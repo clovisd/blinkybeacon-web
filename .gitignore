@@ -8,6 +8,7 @@ vendor/
 
 # Binaries for programs and plugins
 /fsbeacon
+final-build/
 *.exe
 *.dll
 *.so
