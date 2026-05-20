@@ -26,7 +26,7 @@ func RunTray(state *AppState, cbs TrayCallbacks) {
 }
 
 func onTrayReady(state *AppState, cbs TrayCallbacks) {
-	systray.SetIcon(iconIdle)
+	systray.SetIcon(iconSiren)
 	systray.SetTooltip("BlinkyBeacon — Idle")
 
 	mStatus := systray.AddMenuItem("● Beacon: Disconnected", "")
@@ -68,28 +68,24 @@ func onTrayReady(state *AppState, cbs TrayCallbacks) {
 
 				switch {
 				case !connected:
-					systray.SetIcon(iconIdle)
 					systray.SetTooltip("BlinkyBeacon — Disconnected")
 					mStatus.SetTitle("● Beacon: Disconnected")
 					mSpin.Disable()
 					mFlash.Disable()
 					mStop.Disable()
 				case sv == StateSpin:
-					systray.SetIcon(iconSpin)
 					systray.SetTooltip("BlinkyBeacon — Spinning")
 					mStatus.SetTitle("● Beacon: Spinning")
 					mSpin.Disable()
 					mFlash.Enable()
 					mStop.Enable()
 				case sv == StateFlash:
-					systray.SetIcon(iconFlash)
 					systray.SetTooltip("BlinkyBeacon — Flashing")
 					mStatus.SetTitle("● Beacon: Flashing")
 					mSpin.Enable()
 					mFlash.Disable()
 					mStop.Enable()
 				default: // StateIdle, connected
-					systray.SetIcon(iconIdle)
 					systray.SetTooltip("BlinkyBeacon — Idle")
 					mStatus.SetTitle("● Beacon: Idle")
 					mSpin.Enable()
