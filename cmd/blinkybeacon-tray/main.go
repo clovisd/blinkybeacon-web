@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os/exec"
 	"time"
 
 	"github.com/duckfullstop/blinkybeacon/pkg/fsbeacon"
@@ -33,13 +34,38 @@ func main() {
 	}
 
 	appState := NewAppState()
-	httpServer := NewHTTPServer(appState, cfg.Addr, cfg.Port)
 
-	// Start HTTP server in background.
+	// restartCh receives a new Config when the user saves settings via /settings.
+	restartCh := make(chan Config, 1)
+
+	var httpServer *HTTPServer
+	startHTTP := func(c Config) {
+		srv := NewHTTPServer(appState, c.Addr, c.Port, func(newCfg Config) {
+			select {
+			case restartCh <- newCfg:
+			default:
+			}
+		})
+		httpServer = srv
+		addr := fmt.Sprintf("%s:%d", c.Addr, c.Port)
+		appState.SetListenAddr(addr)
+		log.Printf("HTTP server listening on %s", addr)
+		go func() {
+			if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("HTTP server stopped: %v", err)
+			}
+		}()
+	}
+	startHTTP(cfg)
+
+	// Watch for config changes from /settings and restart HTTP on the new address.
 	go func() {
-		log.Printf("HTTP server listening on %s:%d", cfg.Addr, cfg.Port)
-		if err := httpServer.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("HTTP server stopped unexpectedly: %v", err)
+		for newCfg := range restartCh {
+			time.Sleep(300 * time.Millisecond) // let the settings response reach the browser
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			httpServer.Shutdown(ctx)
+			cancel()
+			startHTTP(newCfg)
 		}
 	}()
 
@@ -69,8 +95,7 @@ func main() {
 
 	// Tray runs on the main goroutine and blocks until Quit.
 	quit := make(chan struct{})
-	listenAddr := fmt.Sprintf("%s:%d", cfg.Addr, cfg.Port)
-	RunTray(appState, listenAddr, TrayCallbacks{
+	RunTray(appState, fmt.Sprintf("%s:%d", cfg.Addr, cfg.Port), TrayCallbacks{
 		OnSpin: func() {
 			_, connected, beacon := appState.Get()
 			if !connected {
@@ -107,6 +132,10 @@ func main() {
 			}
 			appState.SetState(StateIdle)
 		},
+		OnSettings: func() {
+			addr := appState.ListenAddr()
+			exec.Command("rundll32", "url.dll,FileProtocolHandler", "http://"+addr+"/settings").Start()
+		},
 		OnQuit: func() {
 			// Capture and clear the beacon atomically so the USB retry loop exits cleanly.
 			_, connected, beacon := appState.Get()
@@ -117,7 +146,9 @@ func main() {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			httpServer.Shutdown(ctx)
+			if httpServer != nil {
+				httpServer.Shutdown(ctx)
+			}
 			close(quit)
 		},
 	})

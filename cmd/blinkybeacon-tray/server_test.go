@@ -22,7 +22,7 @@ func (m *mockBeacon) Close() error { return nil }
 
 func TestHandleStatus_disconnected(t *testing.T) {
 	state := NewAppState()
-	srv := NewHTTPServer(state, "127.0.0.1", 1337)
+	srv := NewHTTPServer(state, "127.0.0.1", 1337, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	w := httptest.NewRecorder()
@@ -43,7 +43,7 @@ func TestHandleStatus_disconnected(t *testing.T) {
 
 func TestHandleSpin_disconnected_returns503(t *testing.T) {
 	state := NewAppState()
-	srv := NewHTTPServer(state, "127.0.0.1", 1337)
+	srv := NewHTTPServer(state, "127.0.0.1", 1337, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/spin", nil)
 	w := httptest.NewRecorder()
@@ -58,7 +58,7 @@ func TestHandleSpin_connected_callsBeacon(t *testing.T) {
 	state := NewAppState()
 	mock := &mockBeacon{}
 	state.SetBeacon(mock)
-	srv := NewHTTPServer(state, "127.0.0.1", 1337)
+	srv := NewHTTPServer(state, "127.0.0.1", 1337, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/spin", nil)
 	w := httptest.NewRecorder()
@@ -80,7 +80,7 @@ func TestHandleFlash_connected_callsBeacon(t *testing.T) {
 	state := NewAppState()
 	mock := &mockBeacon{}
 	state.SetBeacon(mock)
-	srv := NewHTTPServer(state, "127.0.0.1", 1337)
+	srv := NewHTTPServer(state, "127.0.0.1", 1337, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/flash", nil)
 	w := httptest.NewRecorder()
@@ -102,7 +102,7 @@ func TestHandleStop_connected_callsBeacon(t *testing.T) {
 	state := NewAppState()
 	mock := &mockBeacon{}
 	state.SetBeacon(mock)
-	srv := NewHTTPServer(state, "127.0.0.1", 1337)
+	srv := NewHTTPServer(state, "127.0.0.1", 1337, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/stop", nil)
 	w := httptest.NewRecorder()
@@ -122,7 +122,7 @@ func TestHandleStop_connected_callsBeacon(t *testing.T) {
 
 func TestHandleSpin_wrongMethod_returns405(t *testing.T) {
 	state := NewAppState()
-	srv := NewHTTPServer(state, "127.0.0.1", 1337)
+	srv := NewHTTPServer(state, "127.0.0.1", 1337, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/spin", nil)
 	w := httptest.NewRecorder()

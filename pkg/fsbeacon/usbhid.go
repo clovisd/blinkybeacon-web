@@ -62,9 +62,10 @@ func (beacon *FarmBeacon) worker(magic []byte) {
 	defer beacon.Mutex.Unlock()
 
 	beacon.stop = make(chan bool)
-	defer close(beacon.stop)
+	defer func() { beacon.stop = nil }()
 
 	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	// Set the initial device state
 	beacon.hidDevice.Write(magic)
 	for {

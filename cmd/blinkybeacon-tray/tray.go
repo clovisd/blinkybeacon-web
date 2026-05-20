@@ -11,10 +11,11 @@ import (
 // TrayCallbacks are called by the tray UI when the user clicks menu items.
 // Beacon control callbacks (OnSpin, OnFlash, OnStop) run the actual USB command.
 type TrayCallbacks struct {
-	OnSpin  func()
-	OnStop  func()
-	OnFlash func()
-	OnQuit  func()
+	OnSpin     func()
+	OnStop     func()
+	OnFlash    func()
+	OnSettings func()
+	OnQuit     func()
 }
 
 // RunTray starts the system tray. Blocks until the user clicks Quit.
@@ -34,6 +35,7 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 
 	mHTTP := systray.AddMenuItem("HTTP: "+listenAddr, "")
 	mHTTP.Disable()
+	mSettings := systray.AddMenuItem("Settings…", "Change bind address and port")
 
 	systray.AddSeparator()
 
@@ -58,12 +60,17 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 	go func() {
 		var lastState StateValue
 		var lastConnected bool
+		var lastAddr string
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				sv, connected, _ := state.Get()
+				if addr := state.ListenAddr(); addr != lastAddr {
+					lastAddr = addr
+					mHTTP.SetTitle("HTTP: " + addr)
+				}
 				if sv == lastState && connected == lastConnected {
 					continue
 				}
@@ -111,6 +118,10 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 				cbs.OnFlash()
 			case <-mStop.ClickedCh:
 				cbs.OnStop()
+			case <-mSettings.ClickedCh:
+				if cbs.OnSettings != nil {
+					cbs.OnSettings()
+				}
 			case <-mStartup.ClickedCh:
 				if mStartup.Checked() {
 					mStartup.Uncheck()

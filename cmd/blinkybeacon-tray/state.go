@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
 type StateValue string
@@ -25,10 +26,11 @@ type Beacon interface {
 // AppState is the single source of truth for beacon connection and mode.
 // All fields are protected by a single RWMutex so Get/Set are atomic.
 type AppState struct {
-	mu        sync.RWMutex
-	state     StateValue
-	connected bool
-	beacon    Beacon
+	mu         sync.RWMutex
+	state      StateValue
+	connected  bool
+	beacon     Beacon
+	listenAddr atomic.Value // stores string
 }
 
 func NewAppState() *AppState {
@@ -58,4 +60,17 @@ func (a *AppState) SetState(s StateValue) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.state = s
+}
+
+// SetListenAddr stores the current HTTP listen address (e.g. "127.0.0.1:1337").
+func (a *AppState) SetListenAddr(addr string) {
+	a.listenAddr.Store(addr)
+}
+
+// ListenAddr returns the current HTTP listen address.
+func (a *AppState) ListenAddr() string {
+	if v := a.listenAddr.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
 }

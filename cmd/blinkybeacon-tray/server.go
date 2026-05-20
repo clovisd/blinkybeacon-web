@@ -10,6 +10,8 @@ import (
 type HTTPServer struct {
 	state *AppState
 	srv   *http.Server
+	addr  string
+	port  int
 }
 
 type statusResponse struct {
@@ -17,13 +19,26 @@ type statusResponse struct {
 	Connected bool       `json:"connected"`
 }
 
-func NewHTTPServer(state *AppState, addr string, port int) *HTTPServer {
-	s := &HTTPServer{state: state}
+func NewHTTPServer(state *AppState, addr string, port int, onConfigSave func(Config)) *HTTPServer {
+	s := &HTTPServer{state: state, addr: addr, port: port}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/spin", s.handleSpin)
 	mux.HandleFunc("/flash", s.handleFlash)
 	mux.HandleFunc("/stop", s.handleStop)
 	mux.HandleFunc("/status", s.handleStatus)
+
+	sh := &settingsHandler{onSave: onConfigSave}
+	mux.HandleFunc("/settings", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			sh.handleGet(w, r)
+		case http.MethodPost:
+			sh.handlePost(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
 	s.srv = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", addr, port),
 		Handler: mux,
