@@ -3,7 +3,6 @@
 package main
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/getlantern/systray"
@@ -50,47 +49,55 @@ func onTrayReady(state *AppState, cbs TrayCallbacks) {
 	}
 	mQuit := systray.AddMenuItem("Quit", "Stop BlinkyBeacon and exit")
 
+	done := make(chan struct{})
+
 	// Poll AppState every 500ms and sync icon + menu items.
 	go func() {
 		var lastState StateValue
 		var lastConnected bool
 		ticker := time.NewTicker(500 * time.Millisecond)
-		for range ticker.C {
-			sv, connected, _ := state.Get()
-			if sv == lastState && connected == lastConnected {
-				continue
-			}
-			lastState, lastConnected = sv, connected
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sv, connected, _ := state.Get()
+				if sv == lastState && connected == lastConnected {
+					continue
+				}
+				lastState, lastConnected = sv, connected
 
-			switch {
-			case !connected:
-				systray.SetIcon(iconIdle)
-				systray.SetTooltip("BlinkyBeacon — Disconnected")
-				mStatus.SetTitle("● Beacon: Disconnected")
-				mSpin.Disable()
-				mFlash.Disable()
-				mStop.Disable()
-			case sv == StateSpin:
-				systray.SetIcon(iconSpin)
-				systray.SetTooltip("BlinkyBeacon — Spinning")
-				mStatus.SetTitle("● Beacon: Spinning")
-				mSpin.Disable()
-				mFlash.Enable()
-				mStop.Enable()
-			case sv == StateFlash:
-				systray.SetIcon(iconFlash)
-				systray.SetTooltip("BlinkyBeacon — Flashing")
-				mStatus.SetTitle("● Beacon: Flashing")
-				mSpin.Enable()
-				mFlash.Disable()
-				mStop.Enable()
-			default: // StateIdle, connected
-				systray.SetIcon(iconIdle)
-				systray.SetTooltip("BlinkyBeacon — Idle")
-				mStatus.SetTitle("● Beacon: Idle")
-				mSpin.Enable()
-				mFlash.Enable()
-				mStop.Disable()
+				switch {
+				case !connected:
+					systray.SetIcon(iconIdle)
+					systray.SetTooltip("BlinkyBeacon — Disconnected")
+					mStatus.SetTitle("● Beacon: Disconnected")
+					mSpin.Disable()
+					mFlash.Disable()
+					mStop.Disable()
+				case sv == StateSpin:
+					systray.SetIcon(iconSpin)
+					systray.SetTooltip("BlinkyBeacon — Spinning")
+					mStatus.SetTitle("● Beacon: Spinning")
+					mSpin.Disable()
+					mFlash.Enable()
+					mStop.Enable()
+				case sv == StateFlash:
+					systray.SetIcon(iconFlash)
+					systray.SetTooltip("BlinkyBeacon — Flashing")
+					mStatus.SetTitle("● Beacon: Flashing")
+					mSpin.Enable()
+					mFlash.Disable()
+					mStop.Enable()
+				default: // StateIdle, connected
+					systray.SetIcon(iconIdle)
+					systray.SetTooltip("BlinkyBeacon — Idle")
+					mStatus.SetTitle("● Beacon: Idle")
+					mSpin.Enable()
+					mFlash.Enable()
+					mStop.Disable()
+				}
+			case <-done:
+				return
 			}
 		}
 	}()
@@ -114,17 +121,13 @@ func onTrayReady(state *AppState, cbs TrayCallbacks) {
 					SetStartupEnabled(true)
 				}
 			case <-mQuit.ClickedCh:
+				close(done) // signal both goroutines to exit
 				systray.Quit()
 				cbs.OnQuit()
+				return
+			case <-done:
+				return
 			}
 		}
 	}()
-
-	// Set initial status label.
-	sv, connected, _ := state.Get()
-	if !connected {
-		mStatus.SetTitle("● Beacon: Disconnected")
-	} else {
-		mStatus.SetTitle(fmt.Sprintf("● Beacon: %s", string(sv)))
-	}
 }
