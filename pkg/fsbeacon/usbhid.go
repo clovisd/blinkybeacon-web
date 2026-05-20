@@ -39,6 +39,9 @@ type FarmBeacon struct {
 	sync.Mutex
 	stop      chan bool
 	hidDevice *hid.Device
+	// OnError is called when a periodic heartbeat write fails (e.g. beacon unplugged).
+	// Set by the caller to handle disconnection.
+	OnError func()
 }
 
 // OpenFarmBeacon opens the connected Farm Simulator USB beacon for use, and returns a handler struct.
@@ -71,8 +74,12 @@ func (beacon *FarmBeacon) worker(magic []byte) {
 	for {
 		select {
 		case <-ticker.C:
-			// Update HID state with desired magic
-			beacon.hidDevice.Write(magic)
+			if _, err := beacon.hidDevice.Write(magic); err != nil {
+				if beacon.OnError != nil {
+					beacon.OnError()
+				}
+				return
+			}
 		case updateHID := <-beacon.stop:
 			if updateHID {
 				beacon.hidDevice.Write(fs22MagicStop)

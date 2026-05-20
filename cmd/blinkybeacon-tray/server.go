@@ -84,7 +84,8 @@ func (s *HTTPServer) handleSpin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := beacon.Spin(); err != nil {
-		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.state.SetBeacon(nil)
+		s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "beacon disconnected"})
 		return
 	}
 	s.state.SetState(StateSpin)
@@ -102,7 +103,8 @@ func (s *HTTPServer) handleFlash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := beacon.Flash(); err != nil {
-		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.state.SetBeacon(nil)
+		s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "beacon disconnected"})
 		return
 	}
 	s.state.SetState(StateFlash)
@@ -120,7 +122,8 @@ func (s *HTTPServer) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := beacon.Stop(); err != nil {
-		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.state.SetBeacon(nil)
+		s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "beacon disconnected"})
 		return
 	}
 	s.state.SetState(StateIdle)

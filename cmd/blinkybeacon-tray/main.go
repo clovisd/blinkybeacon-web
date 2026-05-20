@@ -79,6 +79,7 @@ func main() {
 				continue
 			}
 			log.Println("Beacon connected")
+			beacon.OnError = func() { appState.SetBeacon(nil) }
 			appState.SetBeacon(beacon)
 
 			// Wait until something marks the beacon disconnected.
