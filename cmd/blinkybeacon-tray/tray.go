@@ -18,19 +18,22 @@ type TrayCallbacks struct {
 }
 
 // RunTray starts the system tray. Blocks until the user clicks Quit.
-func RunTray(state *AppState, cbs TrayCallbacks) {
+func RunTray(state *AppState, listenAddr string, cbs TrayCallbacks) {
 	systray.Run(
-		func() { onTrayReady(state, cbs) },
+		func() { onTrayReady(state, listenAddr, cbs) },
 		func() {},
 	)
 }
 
-func onTrayReady(state *AppState, cbs TrayCallbacks) {
+func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 	systray.SetIcon(iconSiren)
 	systray.SetTooltip("BlinkyBeacon — Idle")
 
 	mStatus := systray.AddMenuItem("● Beacon: Disconnected", "")
 	mStatus.Disable()
+
+	mHTTP := systray.AddMenuItem("HTTP: "+listenAddr, "")
+	mHTTP.Disable()
 
 	systray.AddSeparator()
 

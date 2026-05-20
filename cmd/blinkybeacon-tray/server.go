@@ -17,7 +17,7 @@ type statusResponse struct {
 	Connected bool       `json:"connected"`
 }
 
-func NewHTTPServer(state *AppState, port int) *HTTPServer {
+func NewHTTPServer(state *AppState, addr string, port int) *HTTPServer {
 	s := &HTTPServer{state: state}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/spin", s.handleSpin)
@@ -25,7 +25,7 @@ func NewHTTPServer(state *AppState, port int) *HTTPServer {
 	mux.HandleFunc("/stop", s.handleStop)
 	mux.HandleFunc("/status", s.handleStatus)
 	s.srv = &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", port),
+		Addr:    fmt.Sprintf("%s:%d", addr, port),
 		Handler: mux,
 	}
 	return s

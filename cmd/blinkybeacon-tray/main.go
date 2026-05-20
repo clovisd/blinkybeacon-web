@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -14,15 +15,29 @@ import (
 )
 
 func main() {
-	port := flag.Int("port", 1337, "HTTP server port")
+	addrFlag := flag.String("addr", "", "IP address to bind the HTTP server (default: saved config or 127.0.0.1)")
+	portFlag := flag.Int("port", 0, "HTTP server port (default: saved config or 1337)")
 	flag.Parse()
 
+	cfg := loadConfig()
+	if *addrFlag != "" {
+		cfg.Addr = *addrFlag
+	}
+	if *portFlag != 0 {
+		cfg.Port = *portFlag
+	}
+	if *addrFlag != "" || *portFlag != 0 {
+		if err := saveConfig(cfg); err != nil {
+			log.Printf("Warning: could not save config: %v", err)
+		}
+	}
+
 	appState := NewAppState()
-	httpServer := NewHTTPServer(appState, *port)
+	httpServer := NewHTTPServer(appState, cfg.Addr, cfg.Port)
 
 	// Start HTTP server in background.
 	go func() {
-		log.Printf("HTTP server listening on 127.0.0.1:%d", *port)
+		log.Printf("HTTP server listening on %s:%d", cfg.Addr, cfg.Port)
 		if err := httpServer.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("HTTP server stopped unexpectedly: %v", err)
 		}
@@ -54,7 +69,8 @@ func main() {
 
 	// Tray runs on the main goroutine and blocks until Quit.
 	quit := make(chan struct{})
-	RunTray(appState, TrayCallbacks{
+	listenAddr := fmt.Sprintf("%s:%d", cfg.Addr, cfg.Port)
+	RunTray(appState, listenAddr, TrayCallbacks{
 		OnSpin: func() {
 			_, connected, beacon := appState.Get()
 			if !connected {
