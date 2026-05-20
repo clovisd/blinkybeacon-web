@@ -27,8 +27,8 @@ func RunTray(state *AppState, listenAddr string, cbs TrayCallbacks) {
 }
 
 func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
-	systray.SetIcon(iconSiren)
-	systray.SetTooltip("BlinkyBeacon — Idle")
+	systray.SetIcon(iconDisconnected)
+	systray.SetTooltip("BlinkyBeacon — Searching for beacon…")
 
 	mStatus := systray.AddMenuItem("● Beacon: Disconnected", "")
 	mStatus.Disable()
@@ -78,25 +78,29 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 
 				switch {
 				case !connected:
-					systray.SetTooltip("BlinkyBeacon — Disconnected")
+					systray.SetIcon(iconDisconnected)
+					systray.SetTooltip("BlinkyBeacon — No beacon detected")
 					mStatus.SetTitle("● Beacon: Disconnected")
 					mSpin.Disable()
 					mFlash.Disable()
 					mStop.Disable()
 				case sv == StateSpin:
+					systray.SetIcon(iconSpin)
 					systray.SetTooltip("BlinkyBeacon — Spinning")
 					mStatus.SetTitle("● Beacon: Spinning")
 					mSpin.Disable()
 					mFlash.Enable()
 					mStop.Enable()
 				case sv == StateFlash:
+					systray.SetIcon(iconFlash)
 					systray.SetTooltip("BlinkyBeacon — Flashing")
 					mStatus.SetTitle("● Beacon: Flashing")
 					mSpin.Enable()
 					mFlash.Disable()
 					mStop.Enable()
 				default: // StateIdle, connected
-					systray.SetTooltip("BlinkyBeacon — Idle")
+					systray.SetIcon(iconIdle)
+					systray.SetTooltip("BlinkyBeacon — Idle (beacon ready)")
 					mStatus.SetTitle("● Beacon: Idle")
 					mSpin.Enable()
 					mFlash.Enable()
