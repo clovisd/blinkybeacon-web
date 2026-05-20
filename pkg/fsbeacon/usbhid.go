@@ -130,16 +130,30 @@ func (beacon *FarmBeacon) Spin() (err error) {
 	return
 }
 
-// Stop causes the beacon to turn off.
+// Stop causes the beacon to turn off and starts an idle keepalive worker so
+// disconnect can be detected even while the beacon sits idle.
 func (beacon *FarmBeacon) Stop() (err error) {
 	if err = beacon.ready(); err != nil {
 		return err
 	}
 	if beacon.stop != nil {
-		// Beacon worker already running, stop it along with the animation.
+		// Worker running — stop it (it will write the stop command on exit).
 		beacon.stop <- true
+	} else {
+		// No worker, send stop command directly.
+		if _, err = beacon.hidDevice.Write(fs22MagicStop); err != nil {
+			return
+		}
 	}
+	go beacon.worker(fs22MagicStop)
 	return
+}
+
+// StartIdleWorker begins a keepalive heartbeat for the idle state.
+// Call once after opening a beacon so disconnection is detected immediately,
+// even before any Spin/Flash/Stop command is issued.
+func (beacon *FarmBeacon) StartIdleWorker() {
+	go beacon.worker(fs22MagicStop)
 }
 
 // ready is a helper function that determines whether the beacon is connected and ready for further commands.
@@ -148,9 +162,4 @@ func (beacon *FarmBeacon) ready() (err error) {
 		return beacon.hidDevice.Error()
 	}
 	return nil
-}
-
-// Ready reports whether the beacon is still accessible. Returns non-nil if the USB device has been removed.
-func (beacon *FarmBeacon) Ready() error {
-	return beacon.ready()
 }
