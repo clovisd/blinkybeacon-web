@@ -62,8 +62,8 @@ var (
 	iconDisconnected = sirenIcon(color.RGBA{R: 100, G: 100, B: 100, A: 255})
 	// iconIdle — dim blue-white, connected but not active
 	iconIdle = sirenIcon(color.RGBA{R: 180, G: 210, B: 255, A: 255})
-	// iconSpin — bright green, spinning
-	iconSpin = sirenIcon(color.RGBA{R: 0, G: 220, B: 60, A: 255})
-	// iconFlash — red-orange, flashing
-	iconFlash = sirenIcon(color.RGBA{R: 255, G: 80, B: 20, A: 255})
+	// iconSpin — orange, spinning
+	iconSpin = sirenIcon(color.RGBA{R: 255, G: 140, B: 0, A: 255})
+	// iconFlash — red, flashing
+	iconFlash = sirenIcon(color.RGBA{R: 220, G: 30, B: 30, A: 255})
 )
