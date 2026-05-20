@@ -149,3 +149,8 @@ func (beacon *FarmBeacon) ready() (err error) {
 	}
 	return nil
 }
+
+// Ready reports whether the beacon is still accessible. Returns non-nil if the USB device has been removed.
+func (beacon *FarmBeacon) Ready() error {
+	return beacon.ready()
+}

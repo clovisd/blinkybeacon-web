@@ -82,14 +82,25 @@ func main() {
 			beacon.OnError = func() { appState.SetBeacon(nil) }
 			appState.SetBeacon(beacon)
 
-			// Wait until something marks the beacon disconnected.
+			// Health check loop: detect disconnect during idle or between commands.
+			// Checks every 2s so Companion sees unplug within ~2 seconds.
+			healthTicker := time.NewTicker(2 * time.Second)
+		healthLoop:
 			for {
-				_, connected, _ := appState.Get()
-				if !connected {
-					break
+				select {
+				case <-healthTicker.C:
+					if err := beacon.Ready(); err != nil {
+						log.Println("Beacon disconnected (health check)")
+						appState.SetBeacon(nil)
+						break healthLoop
+					}
+					// Also catch external disconnect (e.g. command failure)
+					if _, connected, _ := appState.Get(); !connected {
+						break healthLoop
+					}
 				}
-				time.Sleep(2 * time.Second)
 			}
+			healthTicker.Stop()
 			beacon.Close()
 		}
 	}()
