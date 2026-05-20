@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/duckfullstop/blinkybeacon/pkg/fsbeacon"
@@ -21,8 +23,8 @@ func main() {
 	// Start HTTP server in background.
 	go func() {
 		log.Printf("HTTP server listening on 127.0.0.1:%d", *port)
-		if err := httpServer.Start(); err != nil {
-			log.Printf("HTTP server stopped: %v", err)
+		if err := httpServer.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("HTTP server stopped unexpectedly: %v", err)
 		}
 	}()
 
@@ -90,8 +92,9 @@ func main() {
 			appState.SetState(StateIdle)
 		},
 		OnQuit: func() {
-			// Stop beacon cleanly before exit.
+			// Capture and clear the beacon atomically so the USB retry loop exits cleanly.
 			_, connected, beacon := appState.Get()
+			appState.SetBeacon(nil)
 			if connected {
 				beacon.Stop()
 				beacon.Close()
