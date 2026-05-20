@@ -12,8 +12,9 @@ const (
 	StateFlash StateValue = "flash"
 )
 
-// Beacon is the interface for a beacon device.
-// This is defined here to avoid pulling in heavyweight platform-specific dependencies in tests.
+// Beacon is a local mirror of pkg/fsbeacon.Beacon. Defined here to avoid
+// importing the go-hid CGO dependency in non-Windows test builds.
+// Keep in sync with pkg/fsbeacon.Beacon. See beacon_check.go for the guard.
 type Beacon interface {
 	Flash() error
 	Spin() error
@@ -48,7 +49,7 @@ func (a *AppState) SetBeacon(b Beacon) {
 	a.beacon = b
 	a.connected = b != nil
 	if b == nil {
-		a.state = StateIdle
+		a.state = StateIdle // always reset mode when disconnecting
 	}
 }
 
