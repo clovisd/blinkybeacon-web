@@ -26,11 +26,12 @@ type Beacon interface {
 // AppState is the single source of truth for beacon connection and mode.
 // All fields are protected by a single RWMutex so Get/Set are atomic.
 type AppState struct {
-	mu         sync.RWMutex
-	state      StateValue
-	connected  bool
-	beacon     Beacon
-	listenAddr atomic.Value // stores string
+	mu          sync.RWMutex
+	state       StateValue
+	connected   bool
+	beacon      Beacon
+	listenAddr  atomic.Value // stores string
+	watchStatus atomic.Value // stores WatchStatus
 }
 
 func NewAppState() *AppState {
@@ -73,4 +74,18 @@ func (a *AppState) ListenAddr() string {
 		return v.(string)
 	}
 	return ""
+}
+
+// SetWatchStatus records what the dashboard watcher currently believes about
+// the feed, so the tray can say so.
+func (a *AppState) SetWatchStatus(s WatchStatus) {
+	a.watchStatus.Store(s)
+}
+
+// WatchStatus returns the watcher's feed status; WatchOff until it runs.
+func (a *AppState) WatchStatus() WatchStatus {
+	if v := a.watchStatus.Load(); v != nil {
+		return v.(WatchStatus)
+	}
+	return WatchOff
 }

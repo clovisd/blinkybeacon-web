@@ -33,9 +33,12 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 	mStatus := systray.AddMenuItem("● Beacon: Disconnected", "")
 	mStatus.Disable()
 
+	mWatch := systray.AddMenuItem("○ Dashboard: not configured", "")
+	mWatch.Disable()
+
 	mHTTP := systray.AddMenuItem("HTTP: "+listenAddr, "")
 	mHTTP.Disable()
-	mSettings := systray.AddMenuItem("Settings…", "Change bind address and port")
+	mSettings := systray.AddMenuItem("Settings…", "Set the dashboard URL, line, bind address and port")
 
 	systray.AddSeparator()
 
@@ -61,6 +64,7 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 		var lastState StateValue
 		var lastConnected bool
 		var lastAddr string
+		var lastWatch WatchStatus = "\x00" // force the first render
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -70,6 +74,10 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 				if addr := state.ListenAddr(); addr != lastAddr {
 					lastAddr = addr
 					mHTTP.SetTitle("HTTP: " + addr)
+				}
+				if ws := state.WatchStatus(); ws != lastWatch {
+					lastWatch = ws
+					mWatch.SetTitle(watchStatusLabel(ws))
 				}
 				if sv == lastState && connected == lastConnected {
 					continue

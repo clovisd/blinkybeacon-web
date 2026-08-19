@@ -12,23 +12,40 @@ import (
 type Config struct {
 	Addr string `json:"addr"`
 	Port int    `json:"port"`
+	// DashboardURL is the base URL of the LIVE Dashboard, e.g.
+	// "http://192.168.1.50:8080". Empty means the watcher stays off and the
+	// beacon is yours to drive by hand from the tray.
+	DashboardURL string `json:"dashboard_url"`
+	// LineNumber is the dashboard line to watch (the N in /line/N/).
+	LineNumber int `json:"line_number"`
 }
 
 const defaultAddr = "127.0.0.1"
 const defaultPort = 1337
+const defaultLineNumber = 1
 
-func configFilePath() (string, error) {
+// configDir is where blinkybeacon-config.json lives: next to the executable.
+// A variable so tests can point it somewhere disposable.
+var configDir = func() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine executable path: %w", err)
 	}
-	return filepath.Join(filepath.Dir(exe), "blinkybeacon-config.json"), nil
+	return filepath.Dir(exe), nil
+}
+
+func configFilePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "blinkybeacon-config.json"), nil
 }
 
 // loadConfig reads the config file and returns its contents, or defaults if the
 // file does not exist or cannot be parsed.
 func loadConfig() Config {
-	cfg := Config{Addr: defaultAddr, Port: defaultPort}
+	cfg := defaultConfig()
 	path, err := configFilePath()
 	if err != nil {
 		return cfg
@@ -38,7 +55,7 @@ func loadConfig() Config {
 		return cfg
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{Addr: defaultAddr, Port: defaultPort}
+		return defaultConfig()
 	}
 	if cfg.Addr == "" {
 		cfg.Addr = defaultAddr
@@ -46,7 +63,14 @@ func loadConfig() Config {
 	if cfg.Port == 0 {
 		cfg.Port = defaultPort
 	}
+	if cfg.LineNumber < 1 {
+		cfg.LineNumber = defaultLineNumber
+	}
 	return cfg
+}
+
+func defaultConfig() Config {
+	return Config{Addr: defaultAddr, Port: defaultPort, LineNumber: defaultLineNumber}
 }
 
 // saveConfig writes cfg to the config file next to the executable.

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/duckfullstop/blinkybeacon/pkg/fsbeacon"
@@ -34,6 +35,16 @@ func main() {
 	}
 
 	appState := NewAppState()
+
+	// currentCfg is the live config: the watcher re-reads it every poll, so
+	// saving new settings retargets it without a restart.
+	var cfgMu sync.Mutex
+	currentCfg := cfg
+	getCfg := func() Config {
+		cfgMu.Lock()
+		defer cfgMu.Unlock()
+		return currentCfg
+	}
 
 	// restartCh receives a new Config when the user saves settings via /settings.
 	restartCh := make(chan Config, 1)
@@ -61,6 +72,9 @@ func main() {
 	// Watch for config changes from /settings and restart HTTP on the new address.
 	go func() {
 		for newCfg := range restartCh {
+			cfgMu.Lock()
+			currentCfg = newCfg
+			cfgMu.Unlock()
 			time.Sleep(300 * time.Millisecond) // let the settings response reach the browser
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			httpServer.Shutdown(ctx)
@@ -95,6 +109,12 @@ func main() {
 			beacon.Close()
 		}
 	}()
+
+	// Dashboard watcher — polls the configured line and drives the beacon.
+	// Always running: it reports itself "off" until a dashboard URL is set, and
+	// leaves the beacon alone while it is, so manual tray control still works.
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	go runWatchLoop(watchCtx, appState, &http.Client{Timeout: pollTimeout}, getCfg, pollInterval)
 
 	// Tray runs on the main goroutine and blocks until Quit.
 	quit := make(chan struct{})
@@ -140,6 +160,7 @@ func main() {
 			exec.Command("rundll32", "url.dll,FileProtocolHandler", "http://"+addr+"/settings").Start()
 		},
 		OnQuit: func() {
+			stopWatch()
 			// Capture and clear the beacon atomically so the USB retry loop exits cleanly.
 			_, connected, beacon := appState.Get()
 			appState.SetBeacon(nil)
