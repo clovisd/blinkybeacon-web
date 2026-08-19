@@ -362,3 +362,40 @@ func TestSettingsPost_rejectsAnImpossibleLineNumber(t *testing.T) {
 		t.Errorf("LineNumber = %d, want the default %d", got.LineNumber, defaultLineNumber)
 	}
 }
+
+func TestSettingsForm_escapesTheSavedValues(t *testing.T) {
+	// /settings has no auth and can be bound to 0.0.0.0, so the stored values
+	// are attacker-reachable. They land inside an HTML attribute.
+	withTempConfig(t)
+	const inject = `" onfocus="alert(1)` + `x`
+	saveConfig(Config{Addr: inject, Port: defaultPort, DashboardURL: inject, LineNumber: 1})
+
+	h := &settingsHandler{}
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	w := httptest.NewRecorder()
+	h.handleGet(w, req)
+
+	if strings.Contains(w.Body.String(), `onfocus="alert(1)`) {
+		t.Errorf("settings form reflected an unescaped attribute break:\n%s", w.Body.String())
+	}
+}
+
+func TestSettingsSavedPage_escapesTheBindAddress(t *testing.T) {
+	withTempConfig(t)
+
+	h := &settingsHandler{}
+	form := url.Values{
+		"addr":          {`" onfocus="alert(1)`},
+		"port":          {"1337"},
+		"dashboard_url": {"http://dash.local"},
+		"line_number":   {"1"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.handlePost(w, req)
+
+	if strings.Contains(w.Body.String(), `onfocus="alert(1)`) {
+		t.Errorf("saved page reflected an unescaped attribute break:\n%s", w.Body.String())
+	}
+}

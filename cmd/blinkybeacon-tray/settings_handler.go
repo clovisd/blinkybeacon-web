@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"strings"
@@ -76,7 +77,11 @@ type settingsHandler struct {
 func (h *settingsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 	cfg := loadConfig()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, settingsFormHTML, cfg.Addr, cfg.Port, cfg.DashboardURL, cfg.LineNumber)
+	// Both strings land inside an HTML attribute and both are user-supplied.
+	// /settings has no auth and can be bound to 0.0.0.0, so treat them as hostile.
+	fmt.Fprintf(w, settingsFormHTML,
+		html.EscapeString(cfg.Addr), cfg.Port,
+		html.EscapeString(cfg.DashboardURL), cfg.LineNumber)
 }
 
 func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
@@ -112,8 +117,13 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	newListenAddr := fmt.Sprintf("%s:%d", addr, port)
 	settingsURL := "http://" + newListenAddr + "/settings"
 
+	// Escaped for the same reason as the form above; the CONFIG keeps the raw
+	// value, only this rendering is escaped.
+	safeAddr := html.EscapeString(newListenAddr)
+	safeURL := html.EscapeString(settingsURL)
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, settingsSavedHTML, settingsURL, newListenAddr, settingsURL)
+	fmt.Fprintf(w, settingsSavedHTML, safeURL, safeAddr, safeURL)
 
 	if h.onSave != nil {
 		go h.onSave(newCfg)
