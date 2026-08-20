@@ -44,7 +44,7 @@ go build -ldflags="-H windowsgui" -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tr
 
 **Tray menu → Settings…** opens a browser-based settings page where you can change the bind address and port, and point the dashboard watcher at a dashboard URL, line number and API token. Settings are saved to `blinkybeacon-config.json` next to the `.exe` and applied immediately (HTTP server restarts on the new address; the watcher retargets on its next poll).
 
-> The settings page has no authentication and can be bound to `0.0.0.0`. The dashboard API token is therefore **never rendered back into the page** — the field always comes up empty, and leaving it blank keeps the saved value. The token is stored in plain text in `blinkybeacon-config.json`, because it has to be sent on every poll; treat that file as a secret.
+> The settings page has no authentication and can be bound to `0.0.0.0`, so the dashboard API token is **never rendered back into the page** — the field always comes up empty, and leaving it blank keeps the saved value. Saving requires a CSRF token from the form the app served, so a page the operator merely visits cannot repoint the watcher (and its credential) at another host; changing the dashboard URL drops the saved token for the same reason. The token is stored in plain text in `blinkybeacon-config.json`, because it has to be sent on every poll; treat that file as a secret.
 
 Command-line flags override saved config on first launch and save for future runs:
 

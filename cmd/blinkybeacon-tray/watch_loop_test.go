@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +91,32 @@ func withRejectedBackoff(t *testing.T, d time.Duration) {
 	orig := rejectedBackoff
 	rejectedBackoff = d
 	t.Cleanup(func() { rejectedBackoff = orig })
+}
+
+// submitSettings drives the two steps a browser actually takes: GET the form to
+// obtain its CSRF token, then POST with it. Anything that can skip the GET is,
+// by definition, not the operator's browser.
+func submitSettings(t *testing.T, h *settingsHandler, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	get := httptest.NewRecorder()
+	h.handleGet(get, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	m := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(get.Body.String())
+	if m == nil {
+		t.Fatalf("settings form carries no CSRF token:\n%s", get.Body.String())
+	}
+	form.Set("csrf", m[1])
+	return postSettings(t, h, form)
+}
+
+// postSettings submits exactly the values given — no CSRF token is added, so a
+// test can forge one, omit one, or send a stale one.
+func postSettings(t *testing.T, h *settingsHandler, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.handlePost(w, req)
+	return w
 }
 
 // startWatchLoop runs the watch loop for the duration of one test and JOINS the
@@ -378,10 +405,7 @@ func TestSettingsPost_savesTheWatcherFields(t *testing.T) {
 		"dashboard_url": {" http://192.168.1.50:8080 "},
 		"line_number":   {"2"},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	h.handlePost(w, req)
+	w := submitSettings(t, h, form)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -405,10 +429,7 @@ func TestSettingsPost_rejectsAnImpossibleLineNumber(t *testing.T) {
 		"dashboard_url": {"http://dash.local"},
 		"line_number":   {"0"},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	h.handlePost(w, req)
+	submitSettings(t, h, form)
 
 	if got := loadConfig(); got.LineNumber != defaultLineNumber {
 		t.Errorf("LineNumber = %d, want the default %d", got.LineNumber, defaultLineNumber)
@@ -442,10 +463,7 @@ func TestSettingsSavedPage_escapesTheBindAddress(t *testing.T) {
 		"dashboard_url": {"http://dash.local"},
 		"line_number":   {"1"},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	h.handlePost(w, req)
+	w := submitSettings(t, h, form)
 
 	if strings.Contains(w.Body.String(), `onfocus="alert(1)`) {
 		t.Errorf("saved page reflected an unescaped attribute break:\n%s", w.Body.String())
@@ -839,10 +857,7 @@ func TestSettingsPost_savesTheToken(t *testing.T) {
 		"line_number":   {"3"},
 		"token":         {"  minted-token  "},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	h.handlePost(w, req)
+	submitSettings(t, h, form)
 
 	if got := loadConfig(); got.APIToken != "minted-token" {
 		t.Errorf("APIToken = %q, want the trimmed token", got.APIToken)
@@ -864,10 +879,7 @@ func TestSettingsPost_blankTokenKeepsTheSavedOne(t *testing.T) {
 		"line_number":   {"3"},
 		"token":         {""},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	h.handlePost(w, req)
+	submitSettings(t, h, form)
 
 	got := loadConfig()
 	if got.APIToken != "minted-token" {
@@ -893,10 +905,7 @@ func TestSettingsPost_clearingTheTokenUnbindsTheWatcher(t *testing.T) {
 		"token":         {""},
 		"token_clear":   {"1"},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	h.handlePost(w, req)
+	submitSettings(t, h, form)
 
 	if got := loadConfig(); got.APIToken != "" {
 		t.Errorf("APIToken = %q, want it cleared", got.APIToken)
@@ -918,10 +927,7 @@ func TestSettingsPost_aNewTokenBeatsTheClearCheckbox(t *testing.T) {
 		"token":         {"new-token"},
 		"token_clear":   {"1"},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	h.handlePost(w, req)
+	submitSettings(t, h, form)
 
 	if got := loadConfig(); got.APIToken != "new-token" {
 		t.Errorf("APIToken = %q, want new-token", got.APIToken)
@@ -939,10 +945,7 @@ func TestSettingsSavedPage_neverEchoesTheToken(t *testing.T) {
 		"line_number":   {"1"},
 		"token":         {token},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	h.handlePost(w, req)
+	w := submitSettings(t, h, form)
 
 	if strings.Contains(w.Body.String(), token) {
 		t.Errorf("the saved page echoed the token back:\n%s", w.Body.String())
@@ -966,9 +969,7 @@ func TestSettingsPost_neverLogsTheToken(t *testing.T) {
 		"line_number":   {"1"},
 		"token":         {token},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	h.handlePost(httptest.NewRecorder(), req)
+	submitSettings(t, h, form)
 
 	if strings.Contains(logs.String(), token) {
 		t.Errorf("saving settings logged the token:\n%s", logs.String())
@@ -1068,5 +1069,122 @@ func TestWatchLoop_releasesTheBeaconOnceAndThenLeavesItAlone(t *testing.T) {
 	}
 	if b.stops != 1 {
 		t.Errorf("Stop called %d times, want exactly 1 — the release is a one-off", b.stops)
+	}
+}
+
+// ------------------------------------- forging a settings save from a page
+
+func TestSettingsForm_carriesACSRFToken(t *testing.T) {
+	withTempConfig(t)
+	h := &settingsHandler{}
+	w := httptest.NewRecorder()
+	h.handleGet(w, httptest.NewRequest(http.MethodGet, "/settings", nil))
+
+	m := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(w.Body.String())
+	if m == nil {
+		t.Fatalf("settings form has no CSRF token:\n%s", w.Body.String())
+	}
+	if len(m[1]) < 32 {
+		t.Errorf("CSRF token %q is too short to be unguessable", m[1])
+	}
+}
+
+func TestSettingsPost_refusesASubmitWithNoCSRFToken(t *testing.T) {
+	// The exploit this blocks: a page the operator happens to visit auto-POSTs
+	// a form to http://127.0.0.1:1337/settings pointing dashboard_url at the
+	// attacker's host, with the token field left blank so the saved token is
+	// carried forward. The watcher would then send the dashboard credential to
+	// the attacker in an Authorization header on its very next poll.
+	withTempConfig(t)
+	saveConfig(Config{Addr: defaultAddr, Port: defaultPort, DashboardURL: "https://dash.example.com", LineNumber: 1, APIToken: "minted-token"})
+
+	h := &settingsHandler{}
+	w := postSettings(t, h, url.Values{
+		"addr":          {"127.0.0.1"},
+		"port":          {"1337"},
+		"dashboard_url": {"https://attacker.example"},
+		"line_number":   {"1"},
+		"token":         {""},
+	})
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a submit with no CSRF token", w.Code)
+	}
+	got := loadConfig()
+	if got.DashboardURL != "https://dash.example.com" {
+		t.Errorf("DashboardURL = %q — a forged submit repointed the watcher", got.DashboardURL)
+	}
+	if got.APIToken != "minted-token" {
+		t.Errorf("APIToken = %q — the saved config was written by a forged submit", got.APIToken)
+	}
+}
+
+func TestSettingsPost_refusesAGuessedCSRFToken(t *testing.T) {
+	withTempConfig(t)
+	saveConfig(Config{Addr: defaultAddr, Port: defaultPort, DashboardURL: "https://dash.example.com", LineNumber: 1, APIToken: "minted-token"})
+
+	h := &settingsHandler{}
+	w := postSettings(t, h, url.Values{
+		"addr":          {"127.0.0.1"},
+		"port":          {"1337"},
+		"dashboard_url": {"https://attacker.example"},
+		"line_number":   {"1"},
+		"csrf":          {"not-the-real-token"},
+	})
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a wrong CSRF token", w.Code)
+	}
+	if got := loadConfig(); got.DashboardURL != "https://dash.example.com" {
+		t.Errorf("DashboardURL = %q — a guessed token was accepted", got.DashboardURL)
+	}
+}
+
+func TestSettingsPost_doesNotCarryTheTokenToADifferentDashboard(t *testing.T) {
+	// Defence in depth, and correct on its own terms: a token minted by one
+	// dashboard is not a credential for another. Changing the URL without
+	// pasting a token unbinds rather than redirecting the credential.
+	withTempConfig(t)
+	saveConfig(Config{Addr: defaultAddr, Port: defaultPort, DashboardURL: "https://dash.example.com", LineNumber: 1, APIToken: "minted-token"})
+
+	h := &settingsHandler{}
+	submitSettings(t, h, url.Values{
+		"addr":          {"127.0.0.1"},
+		"port":          {"1337"},
+		"dashboard_url": {"https://somewhere-else.example"},
+		"line_number":   {"1"},
+		"token":         {""},
+	})
+
+	got := loadConfig()
+	if got.DashboardURL != "https://somewhere-else.example" {
+		t.Errorf("DashboardURL = %q, want the new one", got.DashboardURL)
+	}
+	if got.APIToken != "" {
+		t.Errorf("APIToken = %q — the old dashboard's token followed the URL to a new host", got.APIToken)
+	}
+}
+
+func TestSettingsPost_keepsTheTokenWhenOnlyTheLineChanges(t *testing.T) {
+	// The flip side: switching lines on the SAME dashboard must not make the
+	// operator re-paste the token every time.
+	withTempConfig(t)
+	saveConfig(Config{Addr: defaultAddr, Port: defaultPort, DashboardURL: "https://dash.example.com", LineNumber: 1, APIToken: "minted-token"})
+
+	h := &settingsHandler{}
+	submitSettings(t, h, url.Values{
+		"addr":          {"127.0.0.1"},
+		"port":          {"1337"},
+		"dashboard_url": {"https://dash.example.com"},
+		"line_number":   {"4"},
+		"token":         {""},
+	})
+
+	got := loadConfig()
+	if got.APIToken != "minted-token" {
+		t.Errorf("APIToken = %q, want it kept across a line change", got.APIToken)
+	}
+	if got.LineNumber != 4 {
+		t.Errorf("LineNumber = %d, want 4", got.LineNumber)
 	}
 }

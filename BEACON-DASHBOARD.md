@@ -89,6 +89,14 @@ Some things worth knowing about the token:
   paste the file into a bug report.
 - **It never appears in the log**, and never travels in a URL — only in an
   `Authorization` header, which proxies do not log by default.
+- **Changing the Dashboard URL clears it.** A token minted by one dashboard is
+  not a credential for another, so pointing the app at a different address
+  starts it unbound; paste the token for the new dashboard. Changing the *line
+  number* keeps it — that's the same dashboard.
+- **Saving settings requires the page the app served you.** If you get
+  "this settings form is stale", reopen **Settings…** from the tray menu and
+  save again. That check is what stops a web page you happened to visit from
+  quietly repointing the app — and your token — at somebody else's server.
 - **Revoking it on the dashboard is instant.** The beacon goes dark on the very
   next poll, within about 2 seconds.
 

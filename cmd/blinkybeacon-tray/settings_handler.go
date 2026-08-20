@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"html"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const settingsFormHTML = `<!DOCTYPE html>
@@ -32,6 +36,7 @@ button:hover{background:#106ebe}
 <body>
 <h1>BlinkyBeacon Settings</h1>
 <form method="POST" action="/settings">
+<input type="hidden" name="csrf" value="%s">
 <div class="field">
   <label for="addr">Bind Address</label>
   <input id="addr" name="addr" type="text" value="%s" placeholder="127.0.0.1">
@@ -79,6 +84,44 @@ const settingsSavedHTML = `<!DOCTYPE html>
 
 type settingsHandler struct {
 	onSave func(Config)
+
+	csrfOnce sync.Once
+	csrfTok  string
+}
+
+// csrf is this process's settings-form token, minted on first use.
+//
+// /settings has no login, so the only thing separating "the operator clicked
+// Save" from "a web page the operator happened to visit auto-submitted a form
+// at 127.0.0.1:1337" is proof that whoever is posting could also READ the form.
+// A cross-origin page cannot: the browser will happily send it a form POST, but
+// will not let it see the GET response. So a random value planted in the form
+// and required back on submit is exactly the missing proof.
+//
+// This matters far more since the config gained a token. A forged save could
+// otherwise repoint dashboard_url at an attacker's host while leaving the token
+// field blank — and the watcher would put the dashboard credential in an
+// Authorization header to that host on its very next poll.
+func (h *settingsHandler) csrf() string {
+	h.csrfOnce.Do(func() {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return // leave it empty: csrfOK then refuses everything
+		}
+		h.csrfTok = hex.EncodeToString(b)
+	})
+	return h.csrfTok
+}
+
+// csrfOK reports whether a submitted token matches. It fails closed: if we
+// never got randomness, nothing is accepted, because a settings form that
+// cannot be defended is worse than one that cannot be saved.
+func (h *settingsHandler) csrfOK(got string) bool {
+	want := h.csrf()
+	if want == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func (h *settingsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +135,7 @@ func (h *settingsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 	// Everything else here is user-supplied and lands inside an HTML attribute,
 	// so treat it as hostile.
 	fmt.Fprintf(w, settingsFormHTML,
+		h.csrf(),
 		html.EscapeString(cfg.Addr), cfg.Port,
 		html.EscapeString(cfg.DashboardURL), cfg.LineNumber,
 		html.EscapeString(placeholder), hint)
@@ -122,6 +166,12 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !h.csrfOK(r.FormValue("csrf")) {
+		http.Error(w, "this settings form is stale or was not served by this app — "+
+			"reopen Settings from the tray menu and try again", http.StatusForbidden)
+		return
+	}
+
 	addr := strings.TrimSpace(r.FormValue("addr"))
 	if addr == "" {
 		addr = defaultAddr
@@ -143,6 +193,7 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	// The token field renders empty every time, because it is never echoed
 	// back. So a blank submit means "leave it alone" — otherwise changing the
 	// port would silently unbind the watcher. Clearing it is a deliberate act.
+	saved := loadConfig()
 	token := strings.TrimSpace(r.FormValue("token"))
 	switch {
 	case token != "":
@@ -150,8 +201,14 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		// replacing the token, not forgetting it.
 	case r.FormValue("token_clear") != "":
 		token = ""
+	case dashboardURL != saved.DashboardURL:
+		// A token minted by one dashboard is not a credential for another.
+		// Carrying it across a URL change would be the whole exfiltration
+		// primitive in one line, so a new host starts unbound and the operator
+		// pastes the token for it deliberately.
+		token = ""
 	default:
-		token = loadConfig().APIToken
+		token = saved.APIToken
 	}
 
 	newCfg := Config{Addr: addr, Port: port, DashboardURL: dashboardURL, LineNumber: line, APIToken: token}
