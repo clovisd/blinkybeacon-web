@@ -35,23 +35,23 @@ func draftFeed() *LineState {
 
 // ---------------------------------------------------------------- URL shape
 
-func TestStateSourceURL_usesExistingLineRoute(t *testing.T) {
-	got, err := stateSourceURL("http://192.168.1.50:8080", 3)
+func TestStateSourceURL_usesTheTokenGatedReadAPI(t *testing.T) {
+	got, err := stateSourceURL("https://dash.example.com", 3)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := "http://192.168.1.50:8080/line/3/state"
+	want := "https://dash.example.com/api/v0/lines/3"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
-func TestStateSourceURL_tolerdatesTrailingSlash(t *testing.T) {
+func TestStateSourceURL_toleratesTrailingSlash(t *testing.T) {
 	got, err := stateSourceURL("http://dash.local/", 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != "http://dash.local/line/1/state" {
+	if got != "http://dash.local/api/v0/lines/1" {
 		t.Errorf("got %q", got)
 	}
 }
@@ -61,7 +61,7 @@ func TestStateSourceURL_addsSchemeWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != "http://192.168.1.50:8080/line/2/state" {
+	if got != "http://192.168.1.50:8080/api/v0/lines/2" {
 		t.Errorf("got %q", got)
 	}
 }
@@ -80,59 +80,175 @@ func TestStateSourceURL_rejectsBadLineNumber(t *testing.T) {
 
 // ---------------------------------------------------------------- fetching
 
-func TestFetchLineState_decodesTheRealDashboardContract(t *testing.T) {
-	// Field names, types and nesting copied from DOTA-DASHBOARD
-	// gsi/view_models.py::_snapshot — the payload GET /line/<N>/state returns.
-	const payload = `{
-	  "label": "Line A",
-	  "match_id": "7891234567",
-	  "paused": true,
-	  "pause_active_seconds": 42.5,
-	  "pause_team_assigned": "radiant",
-	  "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
-	  "game_time": 1234,
-	  "clock_time": 1200,
-	  "last_gsi_at": 1755600000.0,
-	  "seconds_since_gsi": 0.83,
-	  "stale_telemetry": false,
-	  "telemetry_state": "live",
-	  "running": true
-	}`
+// v0Projection is the exact payload of the design spec's §4.1 example — the
+// eight fields the dashboard's GET /api/v0/lines/{n} promises, byte for byte.
+const v0Projection = `{"v": 0, "n": 3, "label": "Line C", "running": true,
+ "match_id": null,
+ "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+ "paused": false, "seconds_since_gsi": 0.8, "ts": 1765500000}`
 
+// unauthorizedBody stands in for the dashboard's one constant 401 body. Its
+// content is deliberately uninformative — §4.2's no-oracle rule.
+const unauthorizedBody = `{"v":0,"error":"unauthorized"}`
+
+func TestFetchLineState_decodesTheV0Projection(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(payload))
+		w.Write([]byte(v0Projection))
 	}))
 	defer srv.Close()
 
-	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1)
+	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 3, "tok")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if gotPath != "/line/1/state" {
-		t.Errorf("requested %q, want /line/1/state", gotPath)
+	if gotPath != "/api/v0/lines/3" {
+		t.Errorf("requested %q, want /api/v0/lines/3", gotPath)
 	}
-	if !ls.Paused {
-		t.Error("expected Paused=true")
+	if ls.V != 0 {
+		t.Errorf("V = %d, want 0", ls.V)
+	}
+	if ls.N != 3 {
+		t.Errorf("N = %d, want 3", ls.N)
+	}
+	if ls.Label != "Line C" {
+		t.Errorf("Label = %q, want %q", ls.Label, "Line C")
+	}
+	if !ls.Running {
+		t.Error("expected Running=true")
+	}
+	if ls.MatchID != nil {
+		t.Errorf("MatchID = %v, want nil", *ls.MatchID)
 	}
 	if ls.GameState != "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS" {
 		t.Errorf("GameState = %q", ls.GameState)
 	}
-	if ls.SecondsSinceGSI == nil || *ls.SecondsSinceGSI != 0.83 {
-		t.Errorf("SecondsSinceGSI = %v", ls.SecondsSinceGSI)
+	if ls.Paused {
+		t.Error("expected Paused=false")
+	}
+	if ls.SecondsSinceGSI == nil || *ls.SecondsSinceGSI != 0.8 {
+		t.Errorf("SecondsSinceGSI = %v, want 0.8", ls.SecondsSinceGSI)
+	}
+	if ls.TS != 1765500000 {
+		t.Errorf("TS = %d, want 1765500000", ls.TS)
+	}
+}
+
+func TestFetchLineState_decodesAPopulatedMatchID(t *testing.T) {
+	// match_id is nullable but carries the dashboard's own string ids when set.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"v":0,"n":1,"label":"Line A","running":true,"match_id":"7891234567",` +
+			`"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","paused":true,` +
+			`"seconds_since_gsi":0.83,"ts":1765500000}`))
+	}))
+	defer srv.Close()
+
+	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1, "tok")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ls.MatchID == nil || *ls.MatchID != "7891234567" {
+		t.Errorf("MatchID = %v, want 7891234567", ls.MatchID)
+	}
+	if !ls.Paused {
+		t.Error("expected Paused=true")
+	}
+}
+
+func TestFetchLineState_sendsTheTokenAsABearerHeader(t *testing.T) {
+	var gotAuth, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotQuery = r.URL.RawQuery
+		w.Write([]byte(v0Projection))
+	}))
+	defer srv.Close()
+
+	if _, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 3, "s3cr3t-token"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAuth != "Bearer s3cr3t-token" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer s3cr3t-token")
+	}
+	// The credential rides the header and only the header: a token in a URL
+	// lands in every reverse proxy's access log between here and the origin.
+	if gotQuery != "" {
+		t.Errorf("request carried a query string %q — the token must never travel in a URL", gotQuery)
+	}
+}
+
+func TestFetchLineState_reportsARejectedTokenDistinctly(t *testing.T) {
+	// A 401 is not "the network is down": it is a specific, actionable failure
+	// that the tray has to be able to name.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(unauthorizedBody))
+	}))
+	defer srv.Close()
+
+	_, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1, "wrong-token")
+	if err == nil {
+		t.Fatal("expected an error on 401")
+	}
+	var pe *pollError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error %v is not a *pollError — the loop cannot label it", err)
+	}
+	if pe.Status != http.StatusUnauthorized {
+		t.Errorf("pollError.Status = %d, want 401", pe.Status)
+	}
+}
+
+func TestFetchLineState_reportsAnUnknownLineDistinctly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"v":0,"error":"not found"}`))
+	}))
+	defer srv.Close()
+
+	_, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 9, "tok")
+	if err == nil {
+		t.Fatal("expected an error on 404")
+	}
+	var pe *pollError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error %v is not a *pollError", err)
+	}
+	if pe.Status != http.StatusNotFound {
+		t.Errorf("pollError.Status = %d, want 404", pe.Status)
+	}
+}
+
+func TestFetchLineState_neverNamesTheTokenInItsErrors(t *testing.T) {
+	// Every fetch error ends up in the log. The token must not ride along.
+	const token = "tok-must-never-be-logged"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(unauthorizedBody))
+	}))
+	defer srv.Close()
+
+	_, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1, token)
+	if err == nil {
+		t.Fatal("expected an error on 401")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("fetch error leaks the token: %v", err)
 	}
 }
 
 func TestFetchLineState_acceptsNullSecondsSinceGSI(t *testing.T) {
 	// A line that has never received GSI publishes nulls, not zeros.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"paused": false, "game_state": null, "seconds_since_gsi": null}`))
+		w.Write([]byte(`{"v":0,"n":1,"label":"Line A","running":true,"match_id":null,` +
+			`"game_state":null,"paused":false,"seconds_since_gsi":null,"ts":1765500000}`))
 	}))
 	defer srv.Close()
 
-	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1)
+	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1, "tok")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -145,11 +261,11 @@ func TestFetchLineState_acceptsNullSecondsSinceGSI(t *testing.T) {
 }
 
 func TestFetchLineState_errorsOnRedirectToLanding(t *testing.T) {
-	// The dashboard sends an unauthenticated safe GET to the landing page with
-	// a 302 (auth/middleware.py). Following it yields 200 + HTML, which must
+	// A dashboard that has not shipped the read API yet answers the browser
+	// gate: 302 to the landing page. Following it yields 200 + HTML, which must
 	// NOT be mistaken for a good poll.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/line/1/state" {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}
@@ -157,7 +273,7 @@ func TestFetchLineState_errorsOnRedirectToLanding(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1); err == nil {
+	if _, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1, "tok"); err == nil {
 		t.Fatal("expected an error when the dashboard redirects to the landing page")
 	}
 }
@@ -169,20 +285,8 @@ func TestFetchLineState_errorsOnForbidden(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1); err == nil {
+	if _, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1, "tok"); err == nil {
 		t.Fatal("expected an error on 403")
-	}
-}
-
-func TestFetchLineState_errorsOnUnknownLine(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"unknown line"}`))
-	}))
-	defer srv.Close()
-
-	if _, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 9); err == nil {
-		t.Fatal("expected an error on 404")
 	}
 }
 
@@ -192,7 +296,7 @@ func TestFetchLineState_errorsOnNonJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1); err == nil {
+	if _, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1, "tok"); err == nil {
 		t.Fatal("expected an error on a non-JSON body")
 	}
 }
@@ -560,19 +664,19 @@ func TestAppState_watchStatusRoundTrips(t *testing.T) {
 func TestWatchStatusLabel_namesALostFeedExplicitly(t *testing.T) {
 	// The beacon is dark for both "nothing happening" and "the dashboard is
 	// gone". The tray is the only place that difference can be seen.
-	lost := watchStatusLabel(WatchLost)
+	lost := watchStatusLabel(WatchLost, 1)
 	if !strings.Contains(strings.ToUpper(lost), "LOST") {
 		t.Errorf("WatchLost label = %q, want it to say the feed is lost", lost)
 	}
+}
 
-	labels := map[WatchStatus]string{
-		WatchOff:     watchStatusLabel(WatchOff),
-		WatchOK:      watchStatusLabel(WatchOK),
-		WatchLost:    lost,
-		WatchStopped: watchStatusLabel(WatchStopped),
-	}
+func TestWatchStatusLabel_givesEveryStatusItsOwnWords(t *testing.T) {
+	// Five of these seven mean "the beacon is dark". If any two share a label,
+	// the tray has stopped being able to tell the operator which one it is.
+	all := []WatchStatus{WatchOff, WatchNoToken, WatchOK, WatchLost, WatchRejected, WatchNoLine, WatchStopped}
 	seen := map[string]WatchStatus{}
-	for status, label := range labels {
+	for _, status := range all {
+		label := watchStatusLabel(status, 1)
 		if label == "" {
 			t.Errorf("%q has an empty label", status)
 		}
@@ -580,5 +684,79 @@ func TestWatchStatusLabel_namesALostFeedExplicitly(t *testing.T) {
 			t.Errorf("%q and %q share the label %q", status, other, label)
 		}
 		seen[label] = status
+	}
+}
+
+func TestWatchStatusLabel_saysTheTokenWasRejected(t *testing.T) {
+	// "token rejected" is the whole point: it tells the operator to go and mint
+	// a new one, which no amount of "feed lost" ever would.
+	got := watchStatusLabel(WatchRejected, 3)
+	if !strings.Contains(got, "token rejected") {
+		t.Errorf("WatchRejected label = %q, want it to name the rejected token", got)
+	}
+}
+
+func TestWatchStatusLabel_namesTheMissingLineByNumber(t *testing.T) {
+	got := watchStatusLabel(WatchNoLine, 7)
+	if !strings.Contains(got, "line 7 not found") {
+		t.Errorf("WatchNoLine label = %q, want it to name line 7", got)
+	}
+}
+
+func TestWatchStatusLabel_saysWhenNoTokenIsSet(t *testing.T) {
+	got := watchStatusLabel(WatchNoToken, 1)
+	if !strings.Contains(got, "no token set") {
+		t.Errorf("WatchNoToken label = %q, want it to say no token is set", got)
+	}
+}
+
+// ------------------------------------------------- naming a failed poll
+
+func TestPollFailureStatus_callsA401ARejectedToken(t *testing.T) {
+	err := &pollError{Status: http.StatusUnauthorized, msg: "401"}
+	if got := pollFailureStatus(err); got != WatchRejected {
+		t.Errorf("pollFailureStatus(401) = %q, want rejected", got)
+	}
+}
+
+func TestPollFailureStatus_callsA404AMissingLine(t *testing.T) {
+	err := &pollError{Status: http.StatusNotFound, msg: "404"}
+	if got := pollFailureStatus(err); got != WatchNoLine {
+		t.Errorf("pollFailureStatus(404) = %q, want no-line", got)
+	}
+}
+
+func TestPollFailureStatus_callsAnythingElseALostFeed(t *testing.T) {
+	// A 500, a 403, a dead socket: all of them are "we cannot see the game",
+	// and all of them keep the pre-existing feed-lost wording.
+	for _, err := range []error{
+		&pollError{Status: http.StatusInternalServerError, msg: "500"},
+		&pollError{Status: http.StatusForbidden, msg: "403"},
+		errors.New("dial tcp: connection refused"),
+	} {
+		if got := pollFailureStatus(err); got != WatchLost {
+			t.Errorf("pollFailureStatus(%v) = %q, want lost", err, got)
+		}
+	}
+}
+
+// ------------------------------------------------------------- backoff
+
+func TestPollDelay_backsOffOnlyOnARejectedToken(t *testing.T) {
+	const interval = 2 * time.Second
+	if got := pollDelay(interval, WatchRejected); got != rejectedBackoff {
+		t.Errorf("pollDelay(rejected) = %v, want %v — a revoked token must not be hammered", got, rejectedBackoff)
+	}
+	for _, status := range []WatchStatus{WatchOK, WatchLost, WatchNoLine, WatchStopped, WatchOff, WatchNoToken} {
+		if got := pollDelay(interval, status); got != interval {
+			t.Errorf("pollDelay(%q) = %v, want the configured %v", status, got, interval)
+		}
+	}
+}
+
+func TestPollDelay_neverSpeedsUpASlowerInterval(t *testing.T) {
+	slow := rejectedBackoff + time.Minute
+	if got := pollDelay(slow, WatchRejected); got != slow {
+		t.Errorf("pollDelay = %v, want the configured %v — backoff is a floor, not a target", got, slow)
 	}
 }

@@ -32,6 +32,7 @@ type AppState struct {
 	beacon      Beacon
 	listenAddr  atomic.Value // stores string
 	watchStatus atomic.Value // stores WatchStatus
+	watchLine   atomic.Int64 // the line number the watcher is bound to
 }
 
 func NewAppState() *AppState {
@@ -88,4 +89,15 @@ func (a *AppState) WatchStatus() WatchStatus {
 		return v.(WatchStatus)
 	}
 	return WatchOff
+}
+
+// SetWatchLine records which line the watcher is currently bound to, so the
+// tray can name it — "line 7 not found" beats "line not found".
+func (a *AppState) SetWatchLine(n int) {
+	a.watchLine.Store(int64(n))
+}
+
+// WatchLine returns the bound line number; 0 before anything is bound.
+func (a *AppState) WatchLine() int {
+	return int(a.watchLine.Load())
 }

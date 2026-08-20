@@ -65,6 +65,7 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 		var lastConnected bool
 		var lastAddr string
 		var lastWatch WatchStatus = "\x00" // force the first render
+		lastWatchLine := -1
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -75,9 +76,12 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 					lastAddr = addr
 					mHTTP.SetTitle("HTTP: " + addr)
 				}
-				if ws := state.WatchStatus(); ws != lastWatch {
-					lastWatch = ws
-					mWatch.SetTitle(watchStatusLabel(ws))
+				// The line number is part of the label ("line 7 not found"),
+				// so a retarget has to redraw it even if the status held.
+				ws, wl := state.WatchStatus(), state.WatchLine()
+				if ws != lastWatch || wl != lastWatchLine {
+					lastWatch, lastWatchLine = ws, wl
+					mWatch.SetTitle(watchStatusLabel(ws, wl))
 				}
 				if sv == lastState && connected == lastConnected {
 					continue

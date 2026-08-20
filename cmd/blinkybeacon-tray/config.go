@@ -18,6 +18,13 @@ type Config struct {
 	DashboardURL string `json:"dashboard_url"`
 	// LineNumber is the dashboard line to watch (the N in /line/N/).
 	LineNumber int `json:"line_number"`
+	// APIToken is the bearer token the dashboard admin mints under
+	// Settings -> Integrations. The read API has no anonymous tier, so an
+	// empty token means the watcher does not poll at all.
+	//
+	// Stored under "token" rather than "api_token" because this file is
+	// hand-editable and documented: short beats descriptive at the keyboard.
+	APIToken string `json:"token"`
 }
 
 const defaultAddr = "127.0.0.1"

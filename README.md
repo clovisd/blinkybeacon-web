@@ -17,6 +17,9 @@ A Windows system tray app that:
 - Configurable bind address and port — supports multiple instances on different ports
 - Settings UI accessible from the tray menu (opens in browser)
 - Optional auto-start at Windows login via registry
+- **Watches a LIVE Dashboard line** and drives the beacon by itself — flash when
+  the draft ends, spin for the duration of any pause. Needs a dashboard API
+  token; see [BEACON-DASHBOARD.md](BEACON-DASHBOARD.md)
 
 ### Download
 
@@ -39,7 +42,9 @@ go build -ldflags="-H windowsgui" -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tr
 
 ### Configuration
 
-**Tray menu → Settings…** opens a browser-based settings page where you can change the bind address and port. Settings are saved to `blinkybeacon-config.json` next to the `.exe` and applied immediately (HTTP server restarts on the new address).
+**Tray menu → Settings…** opens a browser-based settings page where you can change the bind address and port, and point the dashboard watcher at a dashboard URL, line number and API token. Settings are saved to `blinkybeacon-config.json` next to the `.exe` and applied immediately (HTTP server restarts on the new address; the watcher retargets on its next poll).
+
+> The settings page has no authentication and can be bound to `0.0.0.0`. The dashboard API token is therefore **never rendered back into the page** — the field always comes up empty, and leaving it blank keeps the saved value. The token is stored in plain text in `blinkybeacon-config.json`, because it has to be sent on every poll; treat that file as a secret.
 
 Command-line flags override saved config on first launch and save for future runs:
 
@@ -56,7 +61,7 @@ blinkybeacon-tray.exe --addr 0.0.0.0 --port 1338
 | `POST` | `/flash` | Start flashing | `200 {"state":"flash","connected":true}` · `503` if beacon not connected |
 | `POST` | `/stop` | Stop beacon | `200 {"state":"idle","connected":true}` · `503` if beacon not connected |
 | `GET` | `/status` | Current state | `200 {"state":"spin"\|"flash"\|"idle","connected":true\|false}` |
-| `GET` | `/settings` | Settings UI | HTML form for address/port configuration |
+| `GET` | `/settings` | Settings UI | HTML form for address/port and dashboard-watcher configuration |
 | `POST` | `/settings` | Save settings | Saves config and restarts HTTP server |
 
 ### BitFocus Companion module

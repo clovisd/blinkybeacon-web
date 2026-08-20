@@ -23,6 +23,8 @@ label{display:block;font-size:.875em;font-weight:600;margin-bottom:6px}
 input{width:100%%;padding:8px 10px;border:1px solid #ccc;border-radius:4px;font-size:1em}
 input:focus{outline:none;border-color:#0078d4;box-shadow:0 0 0 2px #cce4f7}
 .hint{font-size:.8em;color:#666;margin-top:5px}
+.clear{font-size:.8em;color:#666;margin-top:7px;font-weight:400;display:block}
+.clear input{width:auto;margin-right:6px;vertical-align:-1px}
 button{background:#0078d4;color:#fff;border:none;padding:9px 22px;font-size:1em;border-radius:4px;cursor:pointer;margin-top:8px}
 button:hover{background:#106ebe}
 </style>
@@ -49,6 +51,11 @@ button:hover{background:#106ebe}
   <label for="line_number">Line Number</label>
   <input id="line_number" name="line_number" type="number" value="%d" min="1" max="99">
   <div class="hint">The N in /line/N/ &mdash; Line A is 1, Line B is 2, and so on.</div>
+</div>
+<div class="field">
+  <label for="token">Dashboard API Token</label>
+  <input id="token" name="token" type="password" value="" autocomplete="off" spellcheck="false" placeholder="%s">
+  <div class="hint">%s</div>
 </div>
 <button type="submit">Save &amp; Apply</button>
 </form>
@@ -77,11 +84,36 @@ type settingsHandler struct {
 func (h *settingsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 	cfg := loadConfig()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// Both strings land inside an HTML attribute and both are user-supplied.
-	// /settings has no auth and can be bound to 0.0.0.0, so treat them as hostile.
+	// The token is NEVER rendered — not even into a password input, whose
+	// masking is purely visual. /settings has no auth and can be bound to
+	// 0.0.0.0, so anything on this page is readable by anyone who can reach it,
+	// and the dashboard credential is not going to be one of those things.
+	placeholder, hint := tokenFieldText(cfg.APIToken)
+	// Everything else here is user-supplied and lands inside an HTML attribute,
+	// so treat it as hostile.
 	fmt.Fprintf(w, settingsFormHTML,
 		html.EscapeString(cfg.Addr), cfg.Port,
-		html.EscapeString(cfg.DashboardURL), cfg.LineNumber)
+		html.EscapeString(cfg.DashboardURL), cfg.LineNumber,
+		html.EscapeString(placeholder), hint)
+}
+
+// tokenFieldText is what the token field says about the stored token without
+// disclosing any of it: whether one is saved, and what a blank submit means.
+//
+// It takes the stored token and returns none of it. Both return values are
+// fixed strings chosen by this function; the argument only ever picks between
+// them. The hint deliberately carries markup and is rendered as such, so it
+// must stay that way — the moment any part of a stored value reaches these
+// strings, this becomes an injection point.
+func tokenFieldText(saved string) (placeholder, hint string) {
+	if strings.TrimSpace(saved) == "" {
+		return "paste the token from the dashboard",
+			"Minted on the dashboard under Settings &rarr; Integrations (admin only). " +
+				"Without it the watcher does not poll at all."
+	}
+	return "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 (saved)",
+		"A token is <strong>saved</strong>. Leave this blank to keep it, or paste a new one to replace it." +
+			`<label class="clear"><input type="checkbox" name="token_clear" value="1"> Forget the saved token</label>`
 }
 
 func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +140,21 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		line = defaultLineNumber
 	}
 
-	newCfg := Config{Addr: addr, Port: port, DashboardURL: dashboardURL, LineNumber: line}
+	// The token field renders empty every time, because it is never echoed
+	// back. So a blank submit means "leave it alone" — otherwise changing the
+	// port would silently unbind the watcher. Clearing it is a deliberate act.
+	token := strings.TrimSpace(r.FormValue("token"))
+	switch {
+	case token != "":
+		// A typed value wins, even alongside the checkbox: the operator is
+		// replacing the token, not forgetting it.
+	case r.FormValue("token_clear") != "":
+		token = ""
+	default:
+		token = loadConfig().APIToken
+	}
+
+	newCfg := Config{Addr: addr, Port: port, DashboardURL: dashboardURL, LineNumber: line, APIToken: token}
 	if err := saveConfig(newCfg); err != nil {
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
