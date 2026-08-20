@@ -34,6 +34,16 @@ type AppState struct {
 	watchStatus atomic.Value // stores WatchStatus
 	watchDetail atomic.Value // stores WatchDetail
 	watchLine   atomic.Int64 // the line number the watcher is bound to
+	watchLabel  atomic.Value // stores boundLabel
+}
+
+// boundLabel is the dashboard's own name for a line, carried together with the
+// line it names. The two move as one so a name can never outlive the binding it
+// came from: retarget to another line and the name goes quiet until that line's
+// first poll answers, rather than sitting over the wrong line.
+type boundLabel struct {
+	line  int
+	label string
 }
 
 func NewAppState() *AppState {
@@ -116,4 +126,22 @@ func (a *AppState) SetWatchLine(n int) {
 // WatchLine returns the bound line number; 0 before anything is bound.
 func (a *AppState) WatchLine() int {
 	return int(a.watchLine.Load())
+}
+
+// SetWatchLabel records what the dashboard calls a line, from a poll that
+// actually answered. Sticky on purpose: the label is the last one we were told,
+// so a single failed poll does not blank the tray's row — the status row beside
+// it is what reports the failure.
+func (a *AppState) SetWatchLabel(line int, label string) {
+	a.watchLabel.Store(boundLabel{line: line, label: label})
+}
+
+// WatchLabel returns the bound line's name, or "" when we have not been told it
+// — which includes having been told it for some OTHER line.
+func (a *AppState) WatchLabel() string {
+	v, ok := a.watchLabel.Load().(boundLabel)
+	if !ok || v.line != a.WatchLine() {
+		return ""
+	}
+	return v.label
 }

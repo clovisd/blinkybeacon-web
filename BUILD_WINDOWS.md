@@ -14,7 +14,7 @@ Install the mingw-w64 toolchain, then build:
 sudo apt-get install -y gcc-mingw-w64-x86-64          # provides x86_64-w64-mingw32-gcc
 
 GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
-  go build -ldflags='-H windowsgui' -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
+  go build -trimpath -ldflags='-H windowsgui -buildid=' -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
 ```
 
 Verified 2026-08-19 on Ubuntu/WSL2 with Go 1.27.0 and
@@ -45,11 +45,42 @@ cross-build, which supplies its own HID implementation via mingw.
 ```powershell
 git clone https://github.com/YOUR_USERNAME/blinkybeacon.git
 cd blinkybeacon
-go build -ldflags="-H windowsgui" -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
+go build -trimpath -ldflags="-H windowsgui -buildid=" -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
 ```
 
 The `-H windowsgui` flag suppresses the console window so only the tray icon
 appears. It matters in both options.
+
+## Why `-trimpath` and `-buildid=`
+
+**The same commit builds to the same sha256, anywhere.** Measured 2026-08-20 on
+Ubuntu/WSL2 with Go 1.27.0 and `x86_64-w64-mingw32-gcc 13-win32`: repeat builds
+with a cold build cache, and a fresh clone of the same commit at an entirely
+different path, all produced one identical binary. That is what makes a release
+verifiable — clone the tag, rebuild, compare the hash against the published
+`.exe`.
+
+`-trimpath` is what keeps the developer's own filesystem out of the shipped
+binary: without it the exe carries **3114** absolute paths
+(`/home/clovisd/.local/go/src/bufio/bufio.go` and the like); with it, none.
+`-buildid=` clears the action id, which is a hash over those same paths.
+
+**What does change the hash** — so a real mismatch can be told from an expected
+one. Go stamps the build with VCS information, which `go version -m
+blinkybeacon-tray.exe` prints straight back at you:
+
+- a different commit: `vcs.revision` and `vcs.time` are both in the binary;
+- uncommitted changes in the tree: they set `vcs.modified=true`;
+- a source copy with no `.git` at all (an unpacked tarball, say): no stamp, so
+  a different — though equally stable — binary. Rebuild from a checkout.
+
+Adding `-buildvcs=false` collapses all three to a single hash, which is how the
+above was confirmed.
+
+For the record, since it is easy to assume otherwise: these two flags are not
+what makes repeat builds agree. The un-flagged `go build -ldflags='-H
+windowsgui'` is just as repeatable, commit for commit. The flags are worth
+having for the embedded paths.
 
 ## Run
 

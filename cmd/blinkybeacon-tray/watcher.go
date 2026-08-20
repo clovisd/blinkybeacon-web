@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -151,20 +149,21 @@ func pollFailureStatus(err error) WatchStatus {
 	return WatchLost
 }
 
-// stateSourceURL builds the URL the watcher polls: the dashboard's purpose-built
-// token-gated read API (design spec §4.2), which is reachable over the public
-// internet in a way the viewer-tier page routes B0 used are not.
+// dashboardAPIURL builds a URL under the dashboard's purpose-built token-gated
+// read API (design spec §4.2), which is reachable over the public internet in a
+// way the viewer-tier page routes B0 used are not.
 //
-// The token is NOT part of this URL and never will be: it rides the
+// The token is NOT part of any URL this returns and never will be: it rides the
 // Authorization header, because bearer URLs land in reverse-proxy access logs
 // and headers do not.
-func stateSourceURL(dashboardURL string, line int) (string, error) {
+//
+// The operator types the dashboard URL by hand, so this is forgiving about what
+// they type — a bare host:port, a trailing slash — and strict about what comes
+// out: no host, no URL.
+func dashboardAPIURL(dashboardURL, path string) (string, error) {
 	raw := strings.TrimSpace(dashboardURL)
 	if raw == "" {
-		return "", errors.New("dashboard URL is not set")
-	}
-	if line < 1 {
-		return "", fmt.Errorf("line number must be 1 or greater, got %d", line)
+		return "", errNoDashboardURL
 	}
 	if !strings.Contains(raw, "://") {
 		raw = "http://" + raw
@@ -176,66 +175,34 @@ func stateSourceURL(dashboardURL string, line int) (string, error) {
 	if u.Host == "" {
 		return "", fmt.Errorf("bad dashboard URL %q: no host in it", dashboardURL)
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + fmt.Sprintf("/api/v0/lines/%d", line)
+	u.Path = strings.TrimRight(u.Path, "/") + path
 	return u.String(), nil
 }
 
+// stateSourceURL builds the URL the watcher polls: one line's projection.
+func stateSourceURL(dashboardURL string, line int) (string, error) {
+	if strings.TrimSpace(dashboardURL) == "" {
+		return "", errNoDashboardURL
+	}
+	if line < 1 {
+		return "", fmt.Errorf("line number must be 1 or greater, got %d", line)
+	}
+	return dashboardAPIURL(dashboardURL, fmt.Sprintf("%s/%d", linesListPath, line))
+}
+
 // fetchLineState polls the dashboard once and decodes the current level. The
-// token is sent as a bearer credential; an empty one is a caller bug, since the
-// read API has no anonymous tier and the loop is meant to skip the poll
-// entirely rather than send a request that can only ever be refused.
-//
-// Redirects are NOT followed on purpose: a dashboard that has not shipped the
-// read API answers the browser gate with a 302 to the landing page, and
-// following it would hand us a 200 full of HTML — a failed poll wearing a
-// success code.
+// token is sent as a bearer credential by getJSON, which is where the rules
+// about it live; an empty one is a caller bug, since the read API has no
+// anonymous tier and the loop is meant to skip the poll entirely rather than
+// send a request that can only ever be refused.
 func fetchLineState(ctx context.Context, client *http.Client, dashboardURL string, line int, token string) (*LineState, error) {
 	target, err := stateSourceURL(dashboardURL, line)
 	if err != nil {
 		return nil, err
 	}
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return nil, errors.New("no dashboard API token is set")
-	}
-
-	noFollow := *client
-	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := noFollow.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("polling %s: %w", target, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode/100 != 2 {
-		// The status is kept, not flattened: 401 and 404 are the two failures
-		// the operator can actually do something about, and the tray says which.
-		// The body is NOT quoted — §4.2 makes it a constant with no information
-		// in it, and quoting response bodies into logs is how secrets escape.
-		return nil, &pollError{
-			Status: resp.StatusCode,
-			msg:    fmt.Sprintf("polling %s: dashboard answered %s", target, resp.Status),
-		}
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", target, err)
-	}
-
 	var ls LineState
-	if err := json.Unmarshal(body, &ls); err != nil {
-		return nil, fmt.Errorf("decoding %s: %w", target, err)
+	if err := getJSON(ctx, client, target, token, &ls); err != nil {
+		return nil, err
 	}
 	return &ls, nil
 }
@@ -377,6 +344,23 @@ func applyState(app *AppState, want StateValue) {
 		return
 	}
 	app.SetState(want)
+}
+
+// boundLineLabel is the tray's read-only row naming which line the beacon
+// follows. It answers the first question anyone asks of a beacon on a shelf —
+// "which line is that one?" — without making them open Settings to find out.
+//
+// The dashboard's own name for the line is used whenever we have been told it,
+// so the row matches what the operator reads on their screen. Until the first
+// poll answers, the configured number is all we honestly have.
+func boundLineLabel(ws WatchStatus, line int, label string) string {
+	if ws == WatchOff || line < 1 {
+		return "Unbound"
+	}
+	if label == "" {
+		return fmt.Sprintf("Bound: line %d (unnamed)", line)
+	}
+	return "Bound: " + label
 }
 
 // watchStatusLabel is what the tray says about the dashboard feed, for the

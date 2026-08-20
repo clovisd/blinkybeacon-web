@@ -33,6 +33,12 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 	mStatus := systray.AddMenuItem("● Beacon: Disconnected", "")
 	mStatus.Disable()
 
+	// Which line this beacon follows, above what the feed is doing on it. The
+	// first question anyone asks of a beacon on a shelf is which line it is,
+	// and until now the only answer was to open Settings and read a number.
+	mBound := systray.AddMenuItem("Unbound", "")
+	mBound.Disable()
+
 	mWatch := systray.AddMenuItem("○ Dashboard: not configured", "")
 	mWatch.Disable()
 
@@ -65,6 +71,7 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 		var lastConnected bool
 		var lastAddr string
 		lastWatchLabel := "\x00" // force the first render
+		lastBound := "\x00"
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -83,6 +90,14 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 				if watch != lastWatchLabel {
 					lastWatchLabel = watch
 					mWatch.SetTitle(watch)
+				}
+				// Same rule as the row below it: compare the words, because the
+				// line's name arrives on the first poll that answers, under a
+				// status that has not moved.
+				bound := boundLineLabel(state.WatchStatus(), state.WatchLine(), state.WatchLabel())
+				if bound != lastBound {
+					lastBound = bound
+					mBound.SetTitle(bound)
 				}
 				if sv == lastState && connected == lastConnected {
 					continue
