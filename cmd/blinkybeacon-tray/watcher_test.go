@@ -569,6 +569,46 @@ func TestDecide_recoversToSpinIfTheLineIsStillPaused(t *testing.T) {
 	}
 }
 
+func TestDecide_stoppedLineIsDarkEvenWhilePausedOnAFreshFeed(t *testing.T) {
+	// Stage A's retro §1 clarification (3): a STOPPED line can carry
+	// paused:true with a perfectly fresh feed. `running` has to darken the
+	// beacon on its own — the pause is real but nobody is playing, so
+	// spiralling on it would be a confident wrong light.
+	//
+	// The pre-existing stopped-line test also had a null seconds_since_gsi,
+	// which darkens the beacon by itself, so it never isolated `running`.
+	w := NewWatcher()
+	ls := &LineState{
+		Running:         false,
+		Paused:          true,
+		GameState:       "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+		SecondsSinceGSI: secs(0.4), // fresh: nothing else here says "go dark"
+	}
+	state, status := w.Decide(time.Now(), ls)
+	if state != StateIdle {
+		t.Errorf("state = %q, want idle — a stopped line must be dark however paused it claims to be", state)
+	}
+	if status != WatchStopped {
+		t.Errorf("status = %q, want stopped", status)
+	}
+}
+
+func TestDecide_stoppedLineDoesNotFlashAtDraftEnd(t *testing.T) {
+	// The other half: a stopped line must not fire the one-shot either, even
+	// though its game_state moved out of hero selection on a fresh feed.
+	w := NewWatcher()
+	now := time.Now()
+	draft := draftFeed()
+	draft.Running = false
+	w.Decide(now, draft)
+
+	live := liveFeed()
+	live.Running = false
+	if state, _ := w.Decide(now.Add(time.Second), live); state != StateIdle {
+		t.Errorf("state = %q, want idle — a stopped line has no draft to end", state)
+	}
+}
+
 func TestDecide_notRunningLineIsNotAFeedLoss(t *testing.T) {
 	// `running: false` means the line is not accepting GSI. It is a calm idle,
 	// not a broken feed — but it must never light the beacon.
