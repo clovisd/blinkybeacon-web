@@ -14,7 +14,7 @@ Install the mingw-w64 toolchain, then build:
 sudo apt-get install -y gcc-mingw-w64-x86-64          # provides x86_64-w64-mingw32-gcc
 
 GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
-  go build -ldflags='-H windowsgui' -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
+  go build -trimpath -ldflags='-H windowsgui -buildid=' -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
 ```
 
 Verified 2026-08-19 on Ubuntu/WSL2 with Go 1.27.0 and
@@ -45,11 +45,24 @@ cross-build, which supplies its own HID implementation via mingw.
 ```powershell
 git clone https://github.com/YOUR_USERNAME/blinkybeacon.git
 cd blinkybeacon
-go build -ldflags="-H windowsgui" -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
+go build -trimpath -ldflags="-H windowsgui -buildid=" -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
 ```
 
 The `-H windowsgui` flag suppresses the console window so only the tray icon
 appears. It matters in both options.
+
+## Why `-trimpath` and `-buildid=`
+
+**Two builds from the same commit produce one sha256.** Without those two flags
+they do not: cgo/mingw compiles through a per-build temporary `$WORK` directory
+and embeds its path, so `go build -ldflags='-H windowsgui'` alone gives a
+different binary every time — measured 2026-08-20, three builds, three hashes.
+`-trimpath` removes the paths and `-buildid=` clears the action ID that hashes
+them, and the build goes reproducible: measured 2026-08-20 at
+`dashboard-v0.3.0`, two builds, one sha256 `9c06fc8f…c1aa`.
+
+This is why both build lines above carry the flags. Anyone verifying a release
+can rebuild its tag and compare hashes with the published exe.
 
 ## Run
 

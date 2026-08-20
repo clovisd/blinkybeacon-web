@@ -52,14 +52,25 @@ The tray menu's top line tells you whether the beacon was found:
    settings page.
 2. Fill in **Dashboard URL** — the address you use to open the dashboard,
    e.g. `http://192.168.1.50:8080`. Host and port only; no path.
-3. Fill in **Line Number** — the `N` in the dashboard's own URL for that line.
-   Open the line in your browser and read it off the address bar:
-   `http://192.168.1.50:8080/line/`**`2`**`/` means Line Number is `2`.
-   > The number is the line's own id, **not** its position in the list — the
-   > third line on the page is not necessarily line 3. Always read it from the
-   > URL.
+3. **Pick the line from the list.** Once a token is saved (next section), the
+   settings page asks your dashboard which lines it has and offers them by
+   name — `Line C · running`, `Line D · stopped`. Choose yours; there is no
+   number to look up any more.
+   > **No list?** The page falls back to a **Line Number** box and says why in
+   > one line: `token rejected`, `unreachable`, or `no token`. Type the `N`
+   > from the dashboard's own URL for that line —
+   > `http://192.168.1.50:8080/line/`**`2`**`/` means `2`. The number is the
+   > line's own id, **not** its position in the list.
+   >
+   > A line shown greyed out as `no number yet (dashboard < v3.98.0)` cannot be
+   > picked: that dashboard has not given its lines numbers yet, and there is
+   > nothing for the beacon to bind to. Upgrade the dashboard.
 4. Leave **Dashboard API Token** for the next section, and click
    **Save & Apply**.
+
+The list is read by the app itself, not by your browser, so it works across the
+internet with no dashboard-side setup — and your token never reaches the
+settings page.
 
 The watcher picks changes up on its next poll — no restart. Until a token is
 saved the tray will say `○ Dashboard: no token set`, and nothing is polled.
@@ -128,6 +139,17 @@ Some things worth knowing about the token:
 Dark is deliberately ambiguous at the beacon, so the tray menu always spells
 out which one it is:
 
+The tray's top rows also name **which line** the beacon is following, so you
+never have to open Settings to check:
+
+| Tray line | Means |
+|---|---|
+| `Bound: Line C` | Following the line the dashboard calls Line C. |
+| `Bound: line 3 (unnamed)` | Bound to line 3, but no poll has come back yet, so we only know the number. |
+| `Unbound` | No dashboard URL set — the watcher is off and the beacon is yours to drive by hand. |
+
+And below it, what the feed is doing on that line:
+
 | Tray line | Means |
 |---|---|
 | `○ Dashboard: not configured` | No dashboard URL set. The watcher is off. |
@@ -135,7 +157,7 @@ out which one it is:
 | `● Dashboard: watching` | Polling fine, feed is fresh. Trust the light. |
 | `● Dashboard: watching · no draft data (reinstall cfg)` | Polling fine, but this line is publishing no draft information, so **the beacon will not flash at the draft**. Reinstall the tracked PC's cfg from its install link — see [section 5](#5-if-it-isnt-working). |
 | `▲ Dashboard: token rejected` | The dashboard refused the token: it was revoked, expired, or mistyped. Mint a new one and paste it in. |
-| `▲ Dashboard: line 2 not found` | Token accepted, but that line number doesn't exist (or isn't an official line). Re-read the number from the dashboard URL. |
+| `▲ Dashboard: line 2 not found` | Token accepted, but that line number doesn't exist (or isn't an official line). Reopen Settings and pick the line from the list. |
 | `○ Dashboard: idle — no game data yet` | Dashboard reached and the line is running, but it has never heard from Dota since it started. **Nothing is wrong** — there is just no game on this line yet. |
 | `▲ Dashboard: feed went quiet (45s)` | The line WAS receiving game data and has stopped. This is the real "lost feed": the dashboard is fine, Dota has gone silent. Check the tracked PC. |
 | `▲ Dashboard: unreachable` | Can't reach the dashboard at all, or it answered with something we can't read. **The beacon is dark and is telling you nothing.** |
