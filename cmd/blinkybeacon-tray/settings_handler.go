@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const settingsFormHTML = `<!DOCTYPE html>
@@ -24,8 +27,9 @@ h1{font-size:1.25em;margin-bottom:24px}
 h2{font-size:1.05em;margin:26px 0 14px;padding-top:18px;border-top:1px solid #e5e5e5}
 .field{margin-bottom:18px}
 label{display:block;font-size:.875em;font-weight:600;margin-bottom:6px}
-input{width:100%%;padding:8px 10px;border:1px solid #ccc;border-radius:4px;font-size:1em}
-input:focus{outline:none;border-color:#0078d4;box-shadow:0 0 0 2px #cce4f7}
+input,select{width:100%%;padding:8px 10px;border:1px solid #ccc;border-radius:4px;font-size:1em;background:#fff}
+input:focus,select:focus{outline:none;border-color:#0078d4;box-shadow:0 0 0 2px #cce4f7}
+select option:disabled{color:#999}
 .hint{font-size:.8em;color:#666;margin-top:5px}
 .clear{font-size:.8em;color:#666;margin-top:7px;font-weight:400;display:block}
 .clear input{width:auto;margin-right:6px;vertical-align:-1px}
@@ -52,11 +56,7 @@ button:hover{background:#106ebe}
   <input id="dashboard_url" name="dashboard_url" type="text" value="%s" placeholder="http://192.168.1.50:8080">
   <div class="hint">The LIVE Dashboard address. Leave blank to turn the watcher off and drive the beacon by hand.</div>
 </div>
-<div class="field">
-  <label for="line_number">Line Number</label>
-  <input id="line_number" name="line_number" type="number" value="%d" min="1" max="99">
-  <div class="hint">The N in /line/N/ &mdash; Line A is 1, Line B is 2, and so on.</div>
-</div>
+%s
 <div class="field">
   <label for="token">Dashboard API Token</label>
   <input id="token" name="token" type="password" value="" autocomplete="off" spellcheck="false" placeholder="%s">
@@ -84,6 +84,10 @@ const settingsSavedHTML = `<!DOCTYPE html>
 
 type settingsHandler struct {
 	onSave func(Config)
+
+	// client is who asks the dashboard for its line list. A field so tests can
+	// point it at a fixture; nil means the default, which is every real build.
+	client *http.Client
 
 	csrfOnce sync.Once
 	csrfTok  string
@@ -137,7 +141,7 @@ func (h *settingsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, settingsFormHTML,
 		h.csrf(),
 		html.EscapeString(cfg.Addr), cfg.Port,
-		html.EscapeString(cfg.DashboardURL), cfg.LineNumber,
+		html.EscapeString(cfg.DashboardURL), h.lineField(cfg),
 		html.EscapeString(placeholder), hint)
 }
 
@@ -231,4 +235,128 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	if h.onSave != nil {
 		go h.onSave(newCfg)
 	}
+}
+
+// linesFetchTimeout bounds the settings page's look-up of the dashboard's line
+// list. Short on purpose: the page must render whatever happens, so a dashboard
+// that is slow to answer costs the operator a picker, never a settings window
+// that hangs on them.
+const linesFetchTimeout = 3 * time.Second
+
+// lineField renders the form's line control: the picker when the dashboard
+// answered with its lines, and the typed number exactly as v0.3.0 had it when
+// it did not. The page renders either way — this is a settings window, and it
+// must open even when the thing it configures is unreachable.
+func (h *settingsHandler) lineField(cfg Config) string {
+	client := h.client
+	if client == nil {
+		client = &http.Client{Timeout: linesFetchTimeout}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), linesFetchTimeout)
+	defer cancel()
+
+	lines, err := fetchLines(ctx, client, cfg.DashboardURL, cfg.APIToken)
+	switch {
+	case err != nil:
+		return lineNumberFieldHTML(cfg.LineNumber, pickerUnavailableReason(err))
+	case len(lines) == 0:
+		// The look-up worked and there was nothing in it. An empty dropdown is
+		// a control the operator can neither use nor explain.
+		return lineNumberFieldHTML(cfg.LineNumber, "no lines published")
+	}
+	return linePickerHTML(lines, cfg.LineNumber)
+}
+
+// pickerUnavailableReason names, in three words or so, why there is no picker.
+// The operator is looking at a page missing a control they were told to expect,
+// and "token rejected" and "unreachable" want completely different next moves.
+//
+// A dashboard URL that has not been filled in yet is not a failure and gets no
+// reason: the field above is empty and says so. Everything that is neither a
+// refused token nor a missing one is called unreachable, including a dashboard
+// too old to serve the endpoint at all — from this page they are the same fact,
+// which is that no list came back.
+func pickerUnavailableReason(err error) string {
+	switch {
+	case errors.Is(err, errNoDashboardURL):
+		return ""
+	case errors.Is(err, errNoToken):
+		return "no token"
+	}
+	var pe *pollError
+	if errors.As(err, &pe) && pe.Status == http.StatusUnauthorized {
+		return "token rejected"
+	}
+	return "unreachable"
+}
+
+// lineNumberFieldHTML is the v0.3.0 control, kept whole: type the number. The
+// reason, when there is one, rides above the hint that was always here.
+func lineNumberFieldHTML(saved int, reason string) string {
+	note := ""
+	if reason != "" {
+		note = fmt.Sprintf("<strong>Line list unavailable (%s)</strong> &mdash; type the number instead. ",
+			html.EscapeString(reason))
+	}
+	return fmt.Sprintf(`<div class="field">
+  <label for="line_number">Line Number</label>
+  <input id="line_number" name="line_number" type="number" value="%d" min="1" max="99">
+  <div class="hint">%sThe N in /line/N/ &mdash; Line A is 1, Line B is 2, and so on.</div>
+</div>`, saved, note)
+}
+
+// linePickerHTML renders the dashboard's own lines as a picker.
+//
+// Every label here came off the wire from a host the operator typed in, and
+// lands as HTML text on a page with no auth — so every one of them is escaped.
+func linePickerHTML(lines []lineSummary, saved int) string {
+	var b strings.Builder
+	b.WriteString(`<div class="field">
+  <label for="line_number">Line</label>
+<select id="line_number" name="line_number">
+`)
+	listed := false
+	for _, l := range lines {
+		if l.N == nil {
+			// Shown, and unselectable. A dashboard below v3.98.0 has not
+			// allocated line numbers, so there is nothing to bind to — but
+			// dropping the line would leave the operator hunting for a line
+			// that is plainly there on their dashboard, with no clue that the
+			// dashboard, not the beacon, is what needs upgrading.
+			fmt.Fprintf(&b, "<option disabled>%s \u00b7 no number yet (dashboard &lt; v3.98.0)</option>\n",
+				html.EscapeString(l.Label))
+			continue
+		}
+		selected := ""
+		if *l.N == saved {
+			selected = " selected"
+			listed = true
+		}
+		// The page declares charset=utf-8, so the separator goes out as itself
+		// rather than as an entity — the option text is generated, and reading
+		// it back should look like what the operator sees.
+		fmt.Fprintf(&b, "<option value=\"%d\"%s>%s \u00b7 %s</option>\n",
+			*l.N, selected, html.EscapeString(l.Label), runningWord(l.Running))
+	}
+	if !listed && saved >= 1 {
+		// The line this beacon is bound to is not in the list — renamed,
+		// retired, or invisible to this token. Keep it, selected: a picker that
+		// quietly dropped it would rebind the beacon to whichever line happened
+		// to be first the moment the operator pressed Save, having come to the
+		// page to change something else entirely.
+		fmt.Fprintf(&b, "<option value=\"%d\" selected>Line %d (not in the dashboard's list)</option>\n",
+			saved, saved)
+	}
+	b.WriteString(`</select>
+  <div class="hint">Your dashboard's own list, read just now. Change the URL or token above and save to re-read it.</div>
+</div>`)
+	return b.String()
+}
+
+// runningWord is what the picker says a line is doing right now.
+func runningWord(running bool) string {
+	if running {
+		return "running"
+	}
+	return "stopped"
 }

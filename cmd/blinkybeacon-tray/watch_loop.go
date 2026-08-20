@@ -78,6 +78,11 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 			} else {
 				state, status = w.Decide(time.Now(), ls)
 				detail = watchDetail(ls)
+				// Recorded, not acted on: the dashboard's own name for this
+				// line, so the tray's bound row can say "Line C" instead of
+				// making the operator open Settings to find out. Only from a
+				// poll that answered, and stamped with the line it describes.
+				app.SetWatchLabel(c.LineNumber, ls.Label)
 			}
 
 			if status != app.WatchStatus() {
