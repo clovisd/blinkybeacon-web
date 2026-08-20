@@ -315,83 +315,27 @@ func TestDecide_idleWhileDraftIsStillRunning(t *testing.T) {
 	}
 }
 
-func TestDecide_flashesWhenDraftEnds(t *testing.T) {
+func TestDecide_flashesAfterAMissedPollAcrossTheLastPick(t *testing.T) {
+	// The edge is between two polls, not between two clock ticks: a gap that
+	// swallows several polls still leaves false on one side and true on the
+	// other, and the draft still ended.
 	w := NewWatcher()
 	now := time.Now()
-	w.Decide(now, draftFeed())
+	w.Decide(now, draftingFeed())
 
-	state, _ := w.Decide(now.Add(time.Second), liveFeed())
-	if state != StateFlash {
-		t.Errorf("state = %q, want flash at draft end", state)
+	if state, _ := w.Decide(now.Add(30*time.Second), draftDoneFeed()); state != StateFlash {
+		t.Errorf("state = %q, want flash after a missed poll across the last pick", state)
 	}
 }
 
-func TestDecide_flashLastsFiveSecondsThenIdles(t *testing.T) {
-	w := NewWatcher()
-	now := time.Now()
-	w.Decide(now, draftFeed())
-	w.Decide(now.Add(time.Second), liveFeed()) // draft ends here
-
-	if state, _ := w.Decide(now.Add(5*time.Second), liveFeed()); state != StateFlash {
-		t.Errorf("at t+4s of the flash: state = %q, want flash", state)
-	}
-	if state, _ := w.Decide(now.Add(6*time.Second), liveFeed()); state != StateFlash {
-		t.Errorf("at t+5s exactly: state = %q, want flash", state)
-	}
-	if state, _ := w.Decide(now.Add(6100*time.Millisecond), liveFeed()); state != StateIdle {
-		t.Errorf("after the 5s flash: state = %q, want idle", state)
-	}
-}
-
-func TestDecide_flashesWhenDraftEndsStraightIntoPreGame(t *testing.T) {
-	// Draft end is leaving HERO_SELECTION, whatever comes next.
-	w := NewWatcher()
-	now := time.Now()
-	w.Decide(now, draftFeed())
-
-	ls := liveFeed()
-	ls.GameState = "DOTA_GAMERULES_STATE_STRATEGY_TIME"
-	if state, _ := w.Decide(now.Add(time.Second), ls); state != StateFlash {
-		t.Errorf("state = %q, want flash entering strategy time", state)
-	}
-}
-
-func TestDecide_flashesWhenAMissedPollSkipsStrategyTime(t *testing.T) {
-	// A poll gap can take us straight from HERO_SELECTION to GAME_IN_PROGRESS.
-	// The draft still ended; the beacon must still flash.
-	w := NewWatcher()
-	now := time.Now()
-	w.Decide(now, draftFeed())
-
-	ls := liveFeed()
-	ls.GameState = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
-	if state, _ := w.Decide(now.Add(30*time.Second), ls); state != StateFlash {
-		t.Errorf("state = %q, want flash after a missed poll across the draft end", state)
-	}
-}
-
-func TestDecide_duplicatePollDoesNotRestartTheFlash(t *testing.T) {
-	w := NewWatcher()
-	now := time.Now()
-	w.Decide(now, draftFeed())
-	w.Decide(now.Add(time.Second), liveFeed()) // draft ends; flash until t+6s
-
-	// Four more polls of the identical level must not extend the flash.
-	for i := 2; i <= 5; i++ {
-		w.Decide(now.Add(time.Duration(i)*time.Second), liveFeed())
-	}
-	if state, _ := w.Decide(now.Add(6100*time.Millisecond), liveFeed()); state != StateIdle {
-		t.Errorf("state = %q, want idle — duplicate polls must not re-arm the flash", state)
-	}
-}
-
-func TestDecide_duplicateDraftPollsDoNotFlash(t *testing.T) {
+func TestDecide_pollingAnUnfinishedDraftNeverFlashes(t *testing.T) {
+	// false on its own is not an edge, however many times it arrives.
 	w := NewWatcher()
 	now := time.Now()
 	for i := 0; i < 5; i++ {
-		state, _ := w.Decide(now.Add(time.Duration(i)*time.Second), draftFeed())
+		state, _ := w.Decide(now.Add(time.Duration(i)*time.Second), draftingFeed())
 		if state != StateIdle {
-			t.Fatalf("poll %d: state = %q, want idle — the draft has not ended", i, state)
+			t.Fatalf("poll %d: state = %q, want idle — picks are still outstanding", i, state)
 		}
 	}
 }
@@ -428,32 +372,19 @@ func TestDecide_restartMidPauseSpinsImmediately(t *testing.T) {
 	}
 }
 
-func TestDecide_pauseDuringTheFlashWins(t *testing.T) {
-	w := NewWatcher()
-	now := time.Now()
-	w.Decide(now, draftFeed())
-	w.Decide(now.Add(time.Second), liveFeed()) // flashing until t+6s
-
-	paused := liveFeed()
-	paused.Paused = true
-	if state, _ := w.Decide(now.Add(2*time.Second), paused); state != StateSpin {
-		t.Errorf("state = %q, want spin — a pause outranks the flash", state)
-	}
-}
-
 func TestDecide_flashDoesNotResumeAfterAPauseSwallowsIt(t *testing.T) {
 	// The pause covered the whole flash window; when it lifts, the flash is
 	// long expired and must not come back.
 	w := NewWatcher()
 	now := time.Now()
-	w.Decide(now, draftFeed())
-	w.Decide(now.Add(time.Second), liveFeed())
+	w.Decide(now, draftingFeed())
+	w.Decide(now, draftDoneFeed()) // flashing until t+15s
 
-	paused := liveFeed()
+	paused := draftDoneFeed()
 	paused.Paused = true
 	w.Decide(now.Add(2*time.Second), paused)
 
-	if state, _ := w.Decide(now.Add(30*time.Second), liveFeed()); state != StateIdle {
+	if state, _ := w.Decide(now.Add(30*time.Second), draftDoneFeed()); state != StateIdle {
 		t.Errorf("state = %q, want idle", state)
 	}
 }
@@ -499,16 +430,6 @@ func TestDecide_feedLostDuringAPauseGoesDark(t *testing.T) {
 	}
 }
 
-func TestDecide_feedLostWhenGSIIsStale(t *testing.T) {
-	w := NewWatcher()
-	ls := liveFeed()
-	ls.SecondsSinceGSI = secs(feedLostAfterSeconds + 1)
-	state, status := w.Decide(time.Now(), ls)
-	if state != StateIdle || status != WatchLost {
-		t.Errorf("state = %q status = %q, want idle/lost on stale GSI", state, status)
-	}
-}
-
 func TestDecide_staleGSIOutranksAPause(t *testing.T) {
 	w := NewWatcher()
 	ls := liveFeed()
@@ -519,41 +440,18 @@ func TestDecide_staleGSIOutranksAPause(t *testing.T) {
 	}
 }
 
-func TestDecide_feedLostWhenNoGSIHasEverArrived(t *testing.T) {
-	w := NewWatcher()
-	ls := liveFeed()
-	ls.SecondsSinceGSI = nil
-	state, status := w.Decide(time.Now(), ls)
-	if state != StateIdle || status != WatchLost {
-		t.Errorf("state = %q status = %q, want idle/lost when seconds_since_gsi is null", state, status)
-	}
-}
-
 func TestDecide_feedLossCancelsAPendingFlash(t *testing.T) {
 	w := NewWatcher()
 	now := time.Now()
-	w.Decide(now, draftFeed())
-	w.Decide(now.Add(time.Second), liveFeed()) // flashing until t+6s
+	w.Decide(now, draftingFeed())
+	w.Decide(now, draftDoneFeed()) // flashing until t+15s
 
 	if state, _ := w.Decide(now.Add(2*time.Second), nil); state != StateIdle {
 		t.Fatal("expected dark on feed loss")
 	}
 	// Feed comes back inside the original flash window — the flash is gone.
-	if state, _ := w.Decide(now.Add(3*time.Second), liveFeed()); state != StateIdle {
+	if state, _ := w.Decide(now.Add(3*time.Second), draftDoneFeed()); state != StateIdle {
 		t.Errorf("state = %q, want idle — a cancelled flash must not resume", state)
-	}
-}
-
-func TestDecide_feedLossSpanningTheDraftEndDoesNotFlashLate(t *testing.T) {
-	// The gap swallowed the moment the draft ended. Firing the flash on
-	// recovery would tell the desk "the draft just ended" a minute late.
-	w := NewWatcher()
-	now := time.Now()
-	w.Decide(now, draftFeed())
-	w.Decide(now.Add(time.Second), nil) // feed dies during the draft
-
-	if state, _ := w.Decide(now.Add(90*time.Second), liveFeed()); state != StateIdle {
-		t.Errorf("state = %q, want idle — no retroactive flash after a feed gap", state)
 	}
 }
 
@@ -590,22 +488,6 @@ func TestDecide_stoppedLineIsDarkEvenWhilePausedOnAFreshFeed(t *testing.T) {
 	}
 	if status != WatchStopped {
 		t.Errorf("status = %q, want stopped", status)
-	}
-}
-
-func TestDecide_stoppedLineDoesNotFlashAtDraftEnd(t *testing.T) {
-	// The other half: a stopped line must not fire the one-shot either, even
-	// though its game_state moved out of hero selection on a fresh feed.
-	w := NewWatcher()
-	now := time.Now()
-	draft := draftFeed()
-	draft.Running = false
-	w.Decide(now, draft)
-
-	live := liveFeed()
-	live.Running = false
-	if state, _ := w.Decide(now.Add(time.Second), live); state != StateIdle {
-		t.Errorf("state = %q, want idle — a stopped line has no draft to end", state)
 	}
 }
 
@@ -701,22 +583,14 @@ func TestAppState_watchStatusRoundTrips(t *testing.T) {
 	}
 }
 
-func TestWatchStatusLabel_namesALostFeedExplicitly(t *testing.T) {
-	// The beacon is dark for both "nothing happening" and "the dashboard is
-	// gone". The tray is the only place that difference can be seen.
-	lost := watchStatusLabel(WatchLost, 1)
-	if !strings.Contains(strings.ToUpper(lost), "LOST") {
-		t.Errorf("WatchLost label = %q, want it to say the feed is lost", lost)
-	}
-}
-
 func TestWatchStatusLabel_givesEveryStatusItsOwnWords(t *testing.T) {
-	// Five of these seven mean "the beacon is dark". If any two share a label,
+	// Eight of these nine mean "the beacon is dark". If any two share a label,
 	// the tray has stopped being able to tell the operator which one it is.
-	all := []WatchStatus{WatchOff, WatchNoToken, WatchOK, WatchLost, WatchRejected, WatchNoLine, WatchStopped}
+	all := []WatchStatus{WatchOff, WatchNoToken, WatchOK, WatchLost, WatchRejected,
+		WatchNoLine, WatchStopped, WatchNoGameYet, WatchQuiet}
 	seen := map[string]WatchStatus{}
 	for _, status := range all {
-		label := watchStatusLabel(status, 1)
+		label := watchStatusLabel(status, 1, WatchDetail{})
 		if label == "" {
 			t.Errorf("%q has an empty label", status)
 		}
@@ -730,21 +604,21 @@ func TestWatchStatusLabel_givesEveryStatusItsOwnWords(t *testing.T) {
 func TestWatchStatusLabel_saysTheTokenWasRejected(t *testing.T) {
 	// "token rejected" is the whole point: it tells the operator to go and mint
 	// a new one, which no amount of "feed lost" ever would.
-	got := watchStatusLabel(WatchRejected, 3)
+	got := watchStatusLabel(WatchRejected, 3, WatchDetail{})
 	if !strings.Contains(got, "token rejected") {
 		t.Errorf("WatchRejected label = %q, want it to name the rejected token", got)
 	}
 }
 
 func TestWatchStatusLabel_namesTheMissingLineByNumber(t *testing.T) {
-	got := watchStatusLabel(WatchNoLine, 7)
+	got := watchStatusLabel(WatchNoLine, 7, WatchDetail{})
 	if !strings.Contains(got, "line 7 not found") {
 		t.Errorf("WatchNoLine label = %q, want it to name line 7", got)
 	}
 }
 
 func TestWatchStatusLabel_saysWhenNoTokenIsSet(t *testing.T) {
-	got := watchStatusLabel(WatchNoToken, 1)
+	got := watchStatusLabel(WatchNoToken, 1, WatchDetail{})
 	if !strings.Contains(got, "no token set") {
 		t.Errorf("WatchNoToken label = %q, want it to say no token is set", got)
 	}
@@ -798,5 +672,413 @@ func TestPollDelay_neverSpeedsUpASlowerInterval(t *testing.T) {
 	slow := rejectedBackoff + time.Minute
 	if got := pollDelay(slow, WatchRejected); got != slow {
 		t.Errorf("pollDelay = %v, want the configured %v — backoff is a floor, not a target", got, slow)
+	}
+}
+
+// ------------------------------------------------- the draft-complete signal
+
+// v0ProjectionWithDraft is the §4.1 payload as the dashboard publishes it from
+// v3.99.0 on: one additive field, draft_complete, appended last. Built from the
+// frozen contract text, not from the dashboard's own fixtures.
+const v0ProjectionWithDraft = `{"v": 0, "n": 3, "label": "Line C", "running": true,
+ "match_id": "7891234567",
+ "game_state": "DOTA_GAMERULES_STATE_HERO_SELECTION",
+ "paused": false, "seconds_since_gsi": 0.8, "ts": 1765500000,
+ "draft_complete": true}`
+
+// servePayload answers every request with one fixed JSON body.
+func servePayload(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// boolPtr is a helper for the *bool draft_complete field.
+func boolPtr(b bool) *bool { return &b }
+
+// draftingFeed is a live line whose draft block has been seen and is not
+// finished: some of the ten pick slots are still empty.
+func draftingFeed() *LineState {
+	ls := liveFeed()
+	ls.GameState = gameStateHeroSelection
+	ls.MatchID = strPtr("7891234567")
+	ls.DraftComplete = boolPtr(false)
+	return ls
+}
+
+// draftDoneFeed is that same line one poll later: the last pick has landed and
+// all ten slots are filled. This is the moment the owner wants the flash.
+func draftDoneFeed() *LineState {
+	ls := draftingFeed()
+	ls.DraftComplete = boolPtr(true)
+	return ls
+}
+
+func strPtr(s string) *string { return &s }
+
+func TestFetchLineState_decodesACompletedDraft(t *testing.T) {
+	srv := servePayload(t, v0ProjectionWithDraft)
+
+	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 3, "tok")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ls.DraftComplete == nil {
+		t.Fatal("DraftComplete = nil, want a decoded true")
+	}
+	if !*ls.DraftComplete {
+		t.Errorf("DraftComplete = %v, want true", *ls.DraftComplete)
+	}
+}
+
+func TestFetchLineState_decodesAnUnfinishedDraft(t *testing.T) {
+	srv := servePayload(t, `{"v":0,"n":1,"label":"Line A","running":true,"match_id":"789",`+
+		`"game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION","paused":false,`+
+		`"seconds_since_gsi":0.6,"ts":1765500000,"draft_complete":false}`)
+
+	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1, "tok")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ls.DraftComplete == nil {
+		t.Fatal("DraftComplete = nil, want a decoded false")
+	}
+	if *ls.DraftComplete {
+		t.Errorf("DraftComplete = %v, want false", *ls.DraftComplete)
+	}
+}
+
+func TestFetchLineState_nullDraftCompleteIsNotFalse(t *testing.T) {
+	// null is "no draft block seen for this match", which the contract says is
+	// never to be treated as false. A *bool keeps that difference alive; a
+	// plain bool would silently flatten it into "the draft is not finished".
+	srv := servePayload(t, `{"v":0,"n":1,"label":"Line A","running":true,"match_id":null,`+
+		`"game_state":null,"paused":false,"seconds_since_gsi":null,"ts":1765500000,`+
+		`"draft_complete":null}`)
+
+	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 1, "tok")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ls.DraftComplete != nil {
+		t.Errorf("DraftComplete = %v, want nil for an explicit null", *ls.DraftComplete)
+	}
+}
+
+func TestFetchLineState_decodesTheDashboardsOwnTenKeyExample(t *testing.T) {
+	// Byte for byte from the dashboard side's spec §2.2 ("The projection — ten
+	// keys, and the absences are a fence"), as it stands on wt/draft-complete.
+	// Their §2.2 example carries draft_complete null, which is the case this
+	// tray is most likely to get wrong: null must survive as null.
+	const theirs = `{"v": 0, "n": 3, "label": "Line C", "running": true,
+ "match_id": null,
+ "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+ "paused": false, "seconds_since_gsi": 0.8, "ts": 1765500000,
+ "draft_complete": null}`
+	srv := servePayload(t, theirs)
+
+	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 3, "tok")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ls.DraftComplete != nil {
+		t.Errorf("DraftComplete = %v, want nil", *ls.DraftComplete)
+	}
+	// The other nine keys still land, so a tenth field cannot have shifted
+	// anything underneath it.
+	if ls.V != 0 || ls.N != 3 || ls.Label != "Line C" || !ls.Running {
+		t.Errorf("envelope decoded wrong: %+v", ls)
+	}
+	if ls.MatchID != nil {
+		t.Errorf("MatchID = %q, want nil", *ls.MatchID)
+	}
+	if ls.GameState != "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS" || ls.Paused {
+		t.Errorf("game_state/paused decoded wrong: %+v", ls)
+	}
+	if ls.SecondsSinceGSI == nil || *ls.SecondsSinceGSI != 0.8 || ls.TS != 1765500000 {
+		t.Errorf("seconds_since_gsi/ts decoded wrong: %+v", ls)
+	}
+}
+
+func TestFetchLineState_absentDraftCompleteDecodesTheSameAsNull(t *testing.T) {
+	// An older dashboard does not publish the key at all. That tray must reach
+	// exactly the same conclusion as it does for an explicit null — unknown —
+	// rather than deciding the draft is unfinished and arming an edge.
+	srv := servePayload(t, v0Projection) // the pre-v3.99.0 eight-field payload
+
+	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 3, "tok")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ls.DraftComplete != nil {
+		t.Errorf("DraftComplete = %v, want nil when the key is absent", *ls.DraftComplete)
+	}
+}
+
+// ------------------------------------------- flashing at the last final pick
+
+func TestDecide_flashesWhenTheLastPickCompletesTheDraft(t *testing.T) {
+	// The owner's ruling: "'Draft ended' means when all picks and bans have
+	// completed" — the false→true edge, not the end of hero selection.
+	w := NewWatcher()
+	now := time.Now()
+	if state, _ := w.Decide(now, draftingFeed()); state != StateIdle {
+		t.Fatalf("state = %q, want idle while picks are still outstanding", state)
+	}
+
+	if state, _ := w.Decide(now.Add(2*time.Second), draftDoneFeed()); state != StateFlash {
+		t.Errorf("state = %q, want flash at the last final pick", state)
+	}
+}
+
+func TestDecide_flashLastsFifteenSecondsThenIdles(t *testing.T) {
+	w := NewWatcher()
+	now := time.Now()
+	w.Decide(now, draftingFeed())
+	w.Decide(now, draftDoneFeed()) // the flash is armed at `now`
+
+	if state, _ := w.Decide(now.Add(14*time.Second), draftDoneFeed()); state != StateFlash {
+		t.Errorf("at t+14s: state = %q, want flash", state)
+	}
+	if state, _ := w.Decide(now.Add(15*time.Second), draftDoneFeed()); state != StateFlash {
+		t.Errorf("at t+15s exactly: state = %q, want flash", state)
+	}
+	if state, _ := w.Decide(now.Add(15100*time.Millisecond), draftDoneFeed()); state != StateIdle {
+		t.Errorf("after the 15s flash: state = %q, want idle", state)
+	}
+}
+
+func TestDecide_lateStartOnAnAlreadyCompletedDraftDoesNotFlash(t *testing.T) {
+	// A tray that starts polling after the draft finished has never seen false.
+	// null→true is not an edge: flashing here would announce a moment that
+	// passed before the tray was even watching.
+	w := NewWatcher()
+	now := time.Now()
+
+	unknown := liveFeed()
+	unknown.MatchID = strPtr("7891234567")
+	unknown.DraftComplete = nil
+	if state, _ := w.Decide(now, unknown); state != StateIdle {
+		t.Fatalf("state = %q, want idle on a first poll with no draft data", state)
+	}
+
+	if state, _ := w.Decide(now.Add(2*time.Second), draftDoneFeed()); state != StateIdle {
+		t.Errorf("state = %q, want idle — null→true is not the draft completing", state)
+	}
+}
+
+func TestDecide_aColdStartOnACompletedDraftDoesNotFlash(t *testing.T) {
+	// The very first poll the watcher ever takes already says true. There is no
+	// previous value at all, so there is no edge.
+	w := NewWatcher()
+	if state, _ := w.Decide(time.Now(), draftDoneFeed()); state != StateIdle {
+		t.Errorf("state = %q, want idle on a cold first poll of a completed draft", state)
+	}
+}
+
+func TestDecide_aStickyCompletedDraftDoesNotReFlash(t *testing.T) {
+	// draft_complete stays true for the rest of the match. Every later poll is
+	// true→true, which must not re-arm the flash.
+	w := NewWatcher()
+	now := time.Now()
+	w.Decide(now, draftingFeed())
+	w.Decide(now, draftDoneFeed()) // flashing until t+15s
+
+	for i := 1; i <= 5; i++ {
+		w.Decide(now.Add(time.Duration(i)*time.Second), draftDoneFeed())
+	}
+	if state, _ := w.Decide(now.Add(15100*time.Millisecond), draftDoneFeed()); state != StateIdle {
+		t.Errorf("state = %q, want idle — a sticky true must not re-arm the flash", state)
+	}
+}
+
+func TestDecide_aNewMatchResetsTheDraftEdge(t *testing.T) {
+	// Match A was abandoned mid-draft; match B is already drafted by the time
+	// we see it. Carrying A's false across the boundary would fire a flash for
+	// a draft this tray never watched.
+	w := NewWatcher()
+	now := time.Now()
+	w.Decide(now, draftingFeed()) // match 7891234567, false
+
+	matchB := draftDoneFeed()
+	matchB.MatchID = strPtr("7891234599")
+	if state, _ := w.Decide(now.Add(2*time.Second), matchB); state != StateIdle {
+		t.Errorf("state = %q, want idle — a new match starts the edge detector over", state)
+	}
+}
+
+func TestDecide_aNewMatchStillFlashesAtItsOwnDraftEnd(t *testing.T) {
+	// The reset must forget the old match, not deafen the watcher.
+	w := NewWatcher()
+	now := time.Now()
+	w.Decide(now, draftDoneFeed()) // match 7891234567 finished its draft
+
+	drafting := draftingFeed()
+	drafting.MatchID = strPtr("7891234599")
+	w.Decide(now.Add(2*time.Second), drafting)
+
+	done := draftDoneFeed()
+	done.MatchID = strPtr("7891234599")
+	if state, _ := w.Decide(now.Add(4*time.Second), done); state != StateFlash {
+		t.Errorf("state = %q, want flash at the new match's own draft end", state)
+	}
+}
+
+func TestDecide_leavingHeroSelectionNoLongerFlashes(t *testing.T) {
+	// The owner's ruling retired this trigger: in Captains Mode the hero
+	// selection state outlasts the draft by the whole choose-your-hero stretch,
+	// so leaving it fires at the wrong moment. It is not kept as a fallback —
+	// a flash at the wrong moment is worse than no flash.
+	w := NewWatcher()
+	now := time.Now()
+	w.Decide(now, draftFeed()) // game_state HERO_SELECTION, no draft_complete key
+
+	if state, _ := w.Decide(now.Add(time.Second), liveFeed()); state != StateIdle {
+		t.Errorf("state = %q, want idle — leaving hero selection is not the draft ending", state)
+	}
+}
+
+func TestDecide_pauseOutranksTheDraftFlash(t *testing.T) {
+	w := NewWatcher()
+	now := time.Now()
+	w.Decide(now, draftingFeed())
+	w.Decide(now, draftDoneFeed()) // flashing until t+15s
+
+	paused := draftDoneFeed()
+	paused.Paused = true
+	if state, _ := w.Decide(now.Add(2*time.Second), paused); state != StateSpin {
+		t.Errorf("state = %q, want spin — a pause outranks the flash", state)
+	}
+}
+
+func TestDecide_feedLossSpanningTheLastPickDoesNotFlashLate(t *testing.T) {
+	// The gap swallowed the moment the draft completed. Firing on recovery
+	// would tell the desk "the draft just ended" a minute late.
+	w := NewWatcher()
+	now := time.Now()
+	w.Decide(now, draftingFeed())
+	w.Decide(now.Add(2*time.Second), nil) // the feed dies mid-draft
+
+	if state, _ := w.Decide(now.Add(90*time.Second), draftDoneFeed()); state != StateIdle {
+		t.Errorf("state = %q, want idle — no retroactive flash after a feed gap", state)
+	}
+}
+
+func TestDecide_stoppedLineDoesNotFlashWhenItsDraftCompletes(t *testing.T) {
+	w := NewWatcher()
+	now := time.Now()
+	drafting := draftingFeed()
+	drafting.Running = false
+	w.Decide(now, drafting)
+
+	done := draftDoneFeed()
+	done.Running = false
+	if state, _ := w.Decide(now.Add(2*time.Second), done); state != StateIdle {
+		t.Errorf("state = %q, want idle — a stopped line has no draft to finish", state)
+	}
+}
+
+// ------------------------------------------- telling the quiet cases apart
+
+func TestDecide_neverHeardFromDotaIsNotAFeedLoss(t *testing.T) {
+	// A line that has never heard from Dota since it started is idle, not
+	// broken. The light is the same dark; only the words change.
+	w := NewWatcher()
+	ls := liveFeed()
+	ls.SecondsSinceGSI = nil
+	state, status := w.Decide(time.Now(), ls)
+	if state != StateIdle {
+		t.Errorf("state = %q, want idle", state)
+	}
+	if status != WatchNoGameYet {
+		t.Errorf("status = %q, want no-game-yet when seconds_since_gsi is null", status)
+	}
+}
+
+func TestDecide_aFeedThatWasFlowingAndStoppedIsCalledQuiet(t *testing.T) {
+	w := NewWatcher()
+	ls := liveFeed()
+	ls.SecondsSinceGSI = secs(feedLostAfterSeconds + 1)
+	state, status := w.Decide(time.Now(), ls)
+	if state != StateIdle {
+		t.Errorf("state = %q, want idle", state)
+	}
+	if status != WatchQuiet {
+		t.Errorf("status = %q, want quiet for a feed that went silent", status)
+	}
+}
+
+func TestWatchDetail_carriesTheQuietSecondsAndTheMissingDraftFlag(t *testing.T) {
+	ls := liveFeed()
+	ls.SecondsSinceGSI = secs(46.4)
+	ls.DraftComplete = nil
+	d := watchDetail(ls)
+	if d.QuietSeconds != 46.4 {
+		t.Errorf("QuietSeconds = %v, want 46.4", d.QuietSeconds)
+	}
+	if !d.NoDraftData {
+		t.Error("NoDraftData = false, want true when draft_complete is null on a live line")
+	}
+}
+
+func TestWatchDetail_isEmptyForAFailedPoll(t *testing.T) {
+	if d := watchDetail(nil); d != (WatchDetail{}) {
+		t.Errorf("watchDetail(nil) = %+v, want the zero detail", d)
+	}
+}
+
+func TestWatchDetail_doesNotFlagDraftDataThatIsFlowing(t *testing.T) {
+	if d := watchDetail(draftingFeed()); d.NoDraftData {
+		t.Error("NoDraftData = true, want false when draft_complete is present")
+	}
+}
+
+func TestWatchStatusLabel_saysIdleRatherThanLostWhenNoGameHasStarted(t *testing.T) {
+	got := watchStatusLabel(WatchNoGameYet, 1, WatchDetail{})
+	if !strings.Contains(got, "idle") || !strings.Contains(got, "no game data yet") {
+		t.Errorf("WatchNoGameYet label = %q, want it to say idle — no game data yet", got)
+	}
+	if strings.Contains(strings.ToUpper(got), "LOST") {
+		t.Errorf("WatchNoGameYet label = %q, must not call an idle line lost", got)
+	}
+}
+
+func TestWatchStatusLabel_saysHowLongTheFeedHasBeenQuiet(t *testing.T) {
+	got := watchStatusLabel(WatchQuiet, 1, WatchDetail{QuietSeconds: 46.4})
+	if !strings.Contains(got, "feed went quiet") {
+		t.Errorf("WatchQuiet label = %q, want it to say the feed went quiet", got)
+	}
+	if !strings.Contains(got, "46s") {
+		t.Errorf("WatchQuiet label = %q, want it to carry how long, e.g. 46s", got)
+	}
+}
+
+func TestWatchStatusLabel_callsAFailedPollUnreachable(t *testing.T) {
+	got := watchStatusLabel(WatchLost, 1, WatchDetail{})
+	if !strings.Contains(got, "unreachable") {
+		t.Errorf("WatchLost label = %q, want it to say the dashboard is unreachable", got)
+	}
+}
+
+func TestWatchStatusLabel_warnsWhenNoDraftDataIsComing(t *testing.T) {
+	// The operator has to learn this BEFORE the draft, not by watching a beacon
+	// that never flashes.
+	got := watchStatusLabel(WatchOK, 1, WatchDetail{NoDraftData: true})
+	if !strings.Contains(got, "watching") {
+		t.Errorf("label = %q, want it to still say the watcher is watching", got)
+	}
+	if !strings.Contains(got, "no draft data (reinstall cfg)") {
+		t.Errorf("label = %q, want it to say no draft data is coming and why", got)
+	}
+}
+
+func TestWatchStatusLabel_saysNothingAboutTheDraftWhenTheDataIsFlowing(t *testing.T) {
+	got := watchStatusLabel(WatchOK, 1, WatchDetail{})
+	if strings.Contains(got, "draft") {
+		t.Errorf("label = %q, want no draft warning when draft data is arriving", got)
 	}
 }

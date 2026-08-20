@@ -80,7 +80,21 @@ func (s *stubDashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // The v0 projection, at the three levels the state machine cares about.
 const pausedPayload = `{"v":0,"n":1,"label":"Line A","running":true,"match_id":"7891234567","game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","paused":true,"seconds_since_gsi":0.6,"ts":1765500000}`
 const livePayload = `{"v":0,"n":1,"label":"Line A","running":true,"match_id":"7891234567","game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","paused":false,"seconds_since_gsi":0.6,"ts":1765500000}`
+
+// draftPayload is a PRE-v3.99.0 dashboard mid-draft: eight fields, no
+// draft_complete key at all. Kept exactly as it was, because "the operator is
+// running an old dashboard" is now a case the tray has to handle out loud.
 const draftPayload = `{"v":0,"n":1,"label":"Line A","running":true,"match_id":null,"game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION","paused":false,"seconds_since_gsi":0.6,"ts":1765500000}`
+
+// draftingPayload and draftDonePayload are the two sides of the one edge that
+// arms the flash: a draft block seen with picks outstanding, then the same
+// match with all ten pick slots filled.
+const draftingPayload = `{"v":0,"n":1,"label":"Line A","running":true,"match_id":"7891234567","game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION","paused":false,"seconds_since_gsi":0.6,"ts":1765500000,"draft_complete":false}`
+const draftDonePayload = `{"v":0,"n":1,"label":"Line A","running":true,"match_id":"7891234567","game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION","paused":false,"seconds_since_gsi":0.6,"ts":1765500000,"draft_complete":true}`
+
+// quietPayload is a line that WAS flowing and has stopped: running, with a
+// seconds_since_gsi well past the staleness bound.
+const quietPayload = `{"v":0,"n":1,"label":"Line A","running":true,"match_id":"7891234567","game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","paused":false,"seconds_since_gsi":120.4,"ts":1765500000,"draft_complete":true}`
 
 // testToken is what every loop test binds with. The read API has no anonymous
 // tier, so a Config without one polls nothing at all.
@@ -188,8 +202,8 @@ func TestWatchLoop_spinsWhileTheDashboardSaysPaused(t *testing.T) {
 	})
 }
 
-func TestWatchLoop_flashesWhenTheDraftEnds(t *testing.T) {
-	stub := newStubDashboard(draftPayload)
+func TestWatchLoop_flashesWhenTheLastPickLands(t *testing.T) {
+	stub := newStubDashboard(draftingPayload)
 	srv := httptest.NewServer(stub)
 	defer srv.Close()
 
@@ -200,12 +214,84 @@ func TestWatchLoop_flashesWhenTheDraftEnds(t *testing.T) {
 	startWatchLoop(t, app, srv.Client(), func() Config { return cfg }, 5*time.Millisecond)
 
 	waitFor(t, "the first poll", func() bool { return stub.pollCount() > 0 })
-	stub.set(livePayload)
+	stub.set(draftDonePayload)
 
-	waitFor(t, "the beacon to flash at draft end", func() bool {
+	waitFor(t, "the beacon to flash at the last final pick", func() bool {
 		state, _, _ := app.Get()
 		return state == StateFlash
 	})
+}
+
+func TestWatchLoop_doesNotFlashWhenHeroSelectionMerelyEnds(t *testing.T) {
+	// The whole point of the owner's ruling, end to end: a dashboard that has
+	// not shipped draft_complete gives the tray nothing to flash on, and the
+	// old game_state trigger must not fire in its place.
+	stub := newStubDashboard(draftPayload)
+	srv := httptest.NewServer(stub)
+	defer srv.Close()
+
+	app := NewAppState()
+	b := &countingBeacon{}
+	app.SetBeacon(b)
+
+	cfg := Config{DashboardURL: srv.URL, LineNumber: 1, APIToken: testToken}
+	startWatchLoop(t, app, srv.Client(), func() Config { return cfg }, 5*time.Millisecond)
+
+	waitFor(t, "the first poll", func() bool { return stub.pollCount() > 0 })
+	stub.set(livePayload) // hero selection ends
+	waitFor(t, "several more polls", func() bool { return stub.pollCount() > 5 })
+
+	if b.flashes != 0 {
+		t.Errorf("Flash called %d times, want 0 — leaving hero selection is not the draft ending", b.flashes)
+	}
+}
+
+func TestWatchLoop_tellsTheTrayWhenNoDraftDataIsComing(t *testing.T) {
+	// An old dashboard publishes no draft_complete at all. The operator has to
+	// be told, before the draft, that the beacon cannot flash at it.
+	stub := newStubDashboard(draftPayload)
+	srv := httptest.NewServer(stub)
+	defer srv.Close()
+
+	app := NewAppState()
+	app.SetBeacon(&countingBeacon{})
+
+	cfg := Config{DashboardURL: srv.URL, LineNumber: 1, APIToken: testToken}
+	startWatchLoop(t, app, srv.Client(), func() Config { return cfg }, 5*time.Millisecond)
+
+	waitFor(t, "the tray to be warned about the missing draft data", func() bool {
+		return app.WatchStatus() == WatchOK && app.WatchDetail().NoDraftData
+	})
+
+	// And it stops warning the moment a v3.99.0 dashboard answers.
+	stub.set(draftingPayload)
+	waitFor(t, "the warning to clear once draft data arrives", func() bool {
+		return app.WatchStatus() == WatchOK && !app.WatchDetail().NoDraftData
+	})
+}
+
+func TestWatchLoop_callsAQuietFeedQuietAndNotUnreachable(t *testing.T) {
+	// The dashboard is answering perfectly well; it is Dota that went silent.
+	// Reporting that as "unreachable" sends the operator to the wrong machine.
+	stub := newStubDashboard(quietPayload)
+	srv := httptest.NewServer(stub)
+	defer srv.Close()
+
+	app := NewAppState()
+	app.SetBeacon(&countingBeacon{})
+
+	cfg := Config{DashboardURL: srv.URL, LineNumber: 1, APIToken: testToken}
+	startWatchLoop(t, app, srv.Client(), func() Config { return cfg }, 5*time.Millisecond)
+
+	waitFor(t, "the feed to be called quiet", func() bool {
+		return app.WatchStatus() == WatchQuiet
+	})
+	if got := app.WatchDetail().QuietSeconds; got != 120.4 {
+		t.Errorf("QuietSeconds = %v, want 120.4 so the tray can say how long", got)
+	}
+	if state, _, _ := app.Get(); state != StateIdle {
+		t.Errorf("state = %q, want idle — the words change, never the light", state)
+	}
 }
 
 func TestWatchLoop_goesDarkWhenTheDashboardIsUnreachable(t *testing.T) {
@@ -280,8 +366,8 @@ func TestWatchLoop_stopsWhenTheContextIsCancelled(t *testing.T) {
 }
 
 func TestWatchLoop_switchingLineForgetsTheOldLinesDraft(t *testing.T) {
-	// Line 1 is mid-draft; line 2 is already live. Retargeting must not read
-	// "line 1 was drafting, line 2 is live" as a draft ending.
+	// Line 1 has picks outstanding; line 2's draft is already finished.
+	// Retargeting must not read "line 1 was false, line 2 is true" as an edge.
 	// The two lines are served by path, so the ONLY thing the test changes is
 	// the configured line number — no payload/config ordering race.
 	var seen sync.Mutex
@@ -292,10 +378,10 @@ func TestWatchLoop_switchingLineForgetsTheOldLinesDraft(t *testing.T) {
 		seen.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/api/v0/lines/1" {
-			w.Write([]byte(draftPayload))
+			w.Write([]byte(draftingPayload))
 			return
 		}
-		w.Write([]byte(livePayload))
+		w.Write([]byte(draftDonePayload))
 	}))
 	defer srv.Close()
 

@@ -2,9 +2,25 @@
 
 The tray app can watch a LIVE Dashboard line and drive the beacon by itself:
 
-- **The draft ends → the beacon flashes red for 5 seconds.**
+- **The draft ends → the beacon flashes red for 15 seconds.**
 - **The game is paused → the beacon spins amber, for as long as the pause lasts.**
 - **Anything else → the beacon is dark.**
+
+"The draft ends" means exactly what the owner ruled it means:
+
+> "'Draft ended' means when all picks and bans have completed, not when players
+> have picked their assigned hero from the drafted bunch. We want to flash for
+> 15 seconds right when the last final pick is done in the pick/ban phase."
+
+So the beacon fires the moment all ten pick slots are filled — the last final
+pick of the pick/ban phase — **not** when the hero-selection screen goes away.
+In Captains Mode those are minutes apart, and the second one is the wrong
+moment.
+
+> **You must reinstall the tracked PC's cfg for this to work.** Once the
+> dashboard is on v3.99.0 or later, re-run that PC's install link from the
+> dashboard; until you do, the tray says `no draft data (reinstall cfg)` and the
+> beacon will not flash at the draft.
 
 It polls the dashboard every 2 seconds over the dashboard's read API,
 `/api/v0/lines/<N>`, using an **API token** that a dashboard admin mints for
@@ -105,7 +121,7 @@ Some things worth knowing about the token:
 
 | Beacon | Means |
 |---|---|
-| **Flashing red, ~5 seconds** | The draft just ended — the game is starting. |
+| **Flashing red, ~15 seconds** | The last final pick just landed — the draft is done. |
 | **Spinning amber** | The game is paused, right now. It stops when play resumes. |
 | **Dark** | Nothing is happening — **or** the dashboard feed is gone. Check the tray. |
 
@@ -117,13 +133,23 @@ out which one it is:
 | `○ Dashboard: not configured` | No dashboard URL set. The watcher is off. |
 | `○ Dashboard: no token set` | URL set, but no API token. **Nothing is being polled at all** — see [section 3](#3-get-a-token-and-paste-it-in). |
 | `● Dashboard: watching` | Polling fine, feed is fresh. Trust the light. |
+| `● Dashboard: watching · no draft data (reinstall cfg)` | Polling fine, but this line is publishing no draft information, so **the beacon will not flash at the draft**. Reinstall the tracked PC's cfg from its install link — see [section 5](#5-if-it-isnt-working). |
 | `▲ Dashboard: token rejected` | The dashboard refused the token: it was revoked, expired, or mistyped. Mint a new one and paste it in. |
 | `▲ Dashboard: line 2 not found` | Token accepted, but that line number doesn't exist (or isn't an official line). Re-read the number from the dashboard URL. |
-| `▲ Dashboard: FEED LOST` | Can't reach the dashboard, or it has gone quiet. **The beacon is dark and is telling you nothing.** |
+| `○ Dashboard: idle — no game data yet` | Dashboard reached and the line is running, but it has never heard from Dota since it started. **Nothing is wrong** — there is just no game on this line yet. |
+| `▲ Dashboard: feed went quiet (45s)` | The line WAS receiving game data and has stopped. This is the real "lost feed": the dashboard is fine, Dota has gone silent. Check the tracked PC. |
+| `▲ Dashboard: unreachable` | Can't reach the dashboard at all, or it answered with something we can't read. **The beacon is dark and is telling you nothing.** |
 | `○ Dashboard: line not running` | Dashboard reached, but that line isn't accepting game data. |
 
-All six of the non-`watching` lines mean the same thing at the beacon: **dark**.
-The tray is the only place that tells you which one you are looking at.
+All eight of the non-`watching` lines mean the same thing at the beacon:
+**dark**. The tray is the only place that tells you which one you are looking
+at.
+
+Those last three used to be one line that said `FEED LOST` for all of them. An
+idle line between games is not a failure, and calling it one taught everybody to
+ignore the words. They are three separate sentences now: **idle** is nothing to
+do; **went quiet** is the tracked PC; **unreachable** is the dashboard or the
+network.
 
 The rule the watcher follows: **never a confident wrong light.** If it cannot
 see the game, it goes dark rather than leaving the beacon spinning on a pause
@@ -151,13 +177,33 @@ The token worked and the dashboard answered — there is just no such line. It
 must be an **official** line, and the number is the one in the dashboard's own
 URL for it, not its position in the list.
 
-**`▲ FEED LOST` immediately after setting it up**
+**`▲ unreachable` immediately after setting it up**
 
 - Wrong URL or port. Open the same URL in a browser on this PC — you should see
   the dashboard. If the browser can't reach it, nor can the beacon.
-- The dashboard doesn't have the read API. `FEED LOST` (rather than
+- The dashboard doesn't have the read API. `unreachable` (rather than
   `token rejected`) on a URL you can open in a browser usually means the
   dashboard is older than the `/api/v0/lines/` route. Update the dashboard.
+
+**`● watching · no draft data (reinstall cfg)`**
+
+The dashboard is answering and the line is fine — it just isn't publishing
+anything about the draft, so the beacon has nothing to flash at. Everything
+else, including the pause light, keeps working.
+
+Fix it on the **tracked PC**, not on the beacon PC: open that PC's install link
+from the dashboard and run it again, so its Dota cfg is rewritten by the newer
+dashboard. Until that is done — or if the dashboard is older than v3.99.0 — this
+warning stays up, which is the point: you learn the beacon can't flash at the
+draft **before** the draft rather than by watching it not happen.
+
+**The beacon didn't flash at the draft**
+
+- Check the tray said `● watching` with no `no draft data` warning, at the time.
+- The tray only flashes on the **change** from "picks outstanding" to "all picks
+  in". If the tray was started (or retargeted, or lost the feed) after the last
+  pick had already landed, it never saw the change and deliberately stays dark
+  — announcing a moment that has already passed is worse than saying nothing.
 
 **Beacon dark, tray says `watching`, and a game is clearly on**
 
@@ -180,16 +226,19 @@ app mid-pause immediately spins.
 ## 6. Details worth knowing
 
 - **Polls every 2 seconds**, so the light can lag reality by up to ~2 seconds.
-- **The feed counts as lost** if the dashboard hasn't heard from Dota for more
-  than 30 seconds (or can't be reached at all). During a legitimate pause Dota
-  still checks in about every 10 seconds, so a real pause is never mistaken for
-  a dead feed.
-- **A pause outranks the flash.** If a pause begins during the 5-second flash,
+- **The feed counts as quiet** if the dashboard hasn't heard from Dota for more
+  than 30 seconds. During a legitimate pause Dota still checks in about every 10
+  seconds, so a real pause is never mistaken for a dead feed.
+- **A pause outranks the flash.** If a pause begins during the 15-second flash,
   the beacon switches straight to spinning, and does not go back to flashing
   when the pause lifts.
+- **The draft flash fires once per match.** "All picks in" stays true for the
+  rest of the game, so later polls don't re-flash; a new match starts the
+  detector over.
 - **A rejected token backs the polling off to 30 seconds.** Every other state
   keeps the normal 2-second cadence.
-- **A dashboard restart shows `FEED LOST` until Dota next checks in.** The
+- **A dashboard restart shows `idle — no game data yet` until Dota next checks
+  in.** The
   dashboard reports "never heard from Dota" rather than a number it inherited
   from before the restart, so the beacon goes dark instead of trusting a
   freshness figure nobody actually measured. During a live game Dota checks in

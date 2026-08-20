@@ -24,6 +24,10 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 		c := cfg()
 		app.SetWatchLine(c.LineNumber)
 		status := WatchOff
+		// The words the tray puts to that status. Recomputed every tick from
+		// the poll itself, so it can never go stale behind the status it
+		// explains — an unbound or failed poll simply has nothing to add.
+		detail := WatchDetail{}
 
 		target, err := stateSourceURL(c.DashboardURL, c.LineNumber)
 		unbound := WatchStatus("")
@@ -73,6 +77,7 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 				status = pollFailureStatus(ferr)
 			} else {
 				state, status = w.Decide(time.Now(), ls)
+				detail = watchDetail(ls)
 			}
 
 			if status != app.WatchStatus() {
@@ -85,6 +90,7 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 			applyState(app, state)
 		}
 
+		app.SetWatchDetail(detail)
 		app.SetWatchStatus(status)
 
 		// A refused token is a standing condition, not a blip: back off rather
