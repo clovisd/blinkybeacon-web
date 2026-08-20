@@ -53,16 +53,34 @@ appears. It matters in both options.
 
 ## Why `-trimpath` and `-buildid=`
 
-**Two builds from the same commit produce one sha256.** Without those two flags
-they do not: cgo/mingw compiles through a per-build temporary `$WORK` directory
-and embeds its path, so `go build -ldflags='-H windowsgui'` alone gives a
-different binary every time — measured 2026-08-20, three builds, three hashes.
-`-trimpath` removes the paths and `-buildid=` clears the action ID that hashes
-them, and the build goes reproducible: measured 2026-08-20 at
-`dashboard-v0.3.0`, two builds, one sha256 `9c06fc8f…c1aa`.
+**The same commit builds to the same sha256, anywhere.** Measured 2026-08-20 on
+Ubuntu/WSL2 with Go 1.27.0 and `x86_64-w64-mingw32-gcc 13-win32`: repeat builds
+with a cold build cache, and a fresh clone of the same commit at an entirely
+different path, all produced one identical binary. That is what makes a release
+verifiable — clone the tag, rebuild, compare the hash against the published
+`.exe`.
 
-This is why both build lines above carry the flags. Anyone verifying a release
-can rebuild its tag and compare hashes with the published exe.
+`-trimpath` is what keeps the developer's own filesystem out of the shipped
+binary: without it the exe carries **3114** absolute paths
+(`/home/clovisd/.local/go/src/bufio/bufio.go` and the like); with it, none.
+`-buildid=` clears the action id, which is a hash over those same paths.
+
+**What does change the hash** — so a real mismatch can be told from an expected
+one. Go stamps the build with VCS information, which `go version -m
+blinkybeacon-tray.exe` prints straight back at you:
+
+- a different commit: `vcs.revision` and `vcs.time` are both in the binary;
+- uncommitted changes in the tree: they set `vcs.modified=true`;
+- a source copy with no `.git` at all (an unpacked tarball, say): no stamp, so
+  a different — though equally stable — binary. Rebuild from a checkout.
+
+Adding `-buildvcs=false` collapses all three to a single hash, which is how the
+above was confirmed.
+
+For the record, since it is easy to assume otherwise: these two flags are not
+what makes repeat builds agree. The un-flagged `go build -ldflags='-H
+windowsgui'` is just as repeatable, commit for commit. The flags are worth
+having for the embedded paths.
 
 ## Run
 
