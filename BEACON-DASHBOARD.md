@@ -84,9 +84,10 @@ Some things worth knowing about the token:
   you save and the saved token is kept; paste a new one to replace it; tick
   **Forget the saved token** to remove it.
 - **It is stored in plain text** in `blinkybeacon-config.json` next to the
-  `.exe`, because the app has to send it on every poll. Treat that file the way
-  you would treat a password: don't put the folder on a shared drive, and don't
-  paste the file into a bug report.
+  `.exe`, because the app has to send it on every poll. The file is written
+  owner-only (`0600` on Linux/macOS; on Windows the folder's own permissions
+  apply). Treat it the way you would treat a password: don't put the folder on
+  a shared drive, and don't paste the file into a bug report.
 - **It never appears in the log**, and never travels in a URL — only in an
   `Authorization` header, which proxies do not log by default.
 - **Changing the Dashboard URL clears it.** A token minted by one dashboard is

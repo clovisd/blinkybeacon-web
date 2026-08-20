@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1186,5 +1187,58 @@ func TestSettingsPost_keepsTheTokenWhenOnlyTheLineChanges(t *testing.T) {
 	}
 	if got.LineNumber != 4 {
 		t.Errorf("LineNumber = %d, want 4", got.LineNumber)
+	}
+}
+
+func TestSaveConfig_keepsTheTokenFileToTheOwner(t *testing.T) {
+	// The config file used to hold an address, a port and a line number. It now
+	// holds a bearer credential, so world-readable is no longer good enough —
+	// the dashboard persists its own copy of this token at 0600 too.
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file modes are not the access-control mechanism on Windows")
+	}
+	withTempConfig(t)
+	if err := saveConfig(Config{Addr: defaultAddr, Port: defaultPort, LineNumber: 1, APIToken: "minted-token"}); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	path, err := configFilePath()
+	if err != nil {
+		t.Fatalf("configFilePath: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if mode := fi.Mode().Perm(); mode != 0o600 {
+		t.Errorf("config file mode = %#o, want 0600 — it holds a credential", mode)
+	}
+}
+
+func TestSaveConfig_tightensAnAlreadyWorldReadableConfig(t *testing.T) {
+	// Upgrading from a build that predates the token leaves a 0644 file on
+	// disk. os.WriteFile does not change an existing file's mode, so saving
+	// over it has to do that deliberately or the credential lands in a
+	// world-readable file on every existing install.
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file modes are not the access-control mechanism on Windows")
+	}
+	withTempConfig(t)
+	path, err := configFilePath()
+	if err != nil {
+		t.Fatalf("configFilePath: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"addr":"127.0.0.1","port":1337,"line_number":1}`), 0o644); err != nil {
+		t.Fatalf("seeding an old config: %v", err)
+	}
+
+	if err := saveConfig(Config{Addr: defaultAddr, Port: defaultPort, LineNumber: 1, APIToken: "minted-token"}); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if mode := fi.Mode().Perm(); mode != 0o600 {
+		t.Errorf("config file mode = %#o, want 0600 after re-saving over an old 0644 file", mode)
 	}
 }

@@ -80,6 +80,11 @@ func defaultConfig() Config {
 	return Config{Addr: defaultAddr, Port: defaultPort, LineNumber: defaultLineNumber}
 }
 
+// configFileMode keeps the config file to its owner. It holds APIToken, a
+// bearer credential for the dashboard — which persists its own copy of the same
+// token at 0600 — so world-readable is not good enough any more.
+const configFileMode = 0o600
+
 // saveConfig writes cfg to the config file next to the executable.
 func saveConfig(cfg Config) error {
 	path, err := configFilePath()
@@ -90,5 +95,12 @@ func saveConfig(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	if err := os.WriteFile(path, data, configFileMode); err != nil {
+		return err
+	}
+	// WriteFile's mode only applies when it CREATES the file, so upgrading from
+	// a build that predates the token would otherwise leave the credential in
+	// the 0644 file that build left behind. On Windows this only touches the
+	// read-only bit, which is harmless.
+	return os.Chmod(path, configFileMode)
 }
