@@ -189,6 +189,13 @@ app mid-pause immediately spins.
   when the pause lifts.
 - **A rejected token backs the polling off to 30 seconds.** Every other state
   keeps the normal 2-second cadence.
+- **A dashboard restart shows `FEED LOST` until Dota next checks in.** The
+  dashboard reports "never heard from Dota" rather than a number it inherited
+  from before the restart, so the beacon goes dark instead of trusting a
+  freshness figure nobody actually measured. During a live game Dota checks in
+  within a second or two, and during a pause about every 10 seconds, so this
+  clears itself quickly — but if you restart the dashboard mid-pause, expect the
+  beacon to be dark for a moment before it resumes spinning.
 - **Settings live in `blinkybeacon-config.json`**, next to the `.exe`:
 
   ```json
