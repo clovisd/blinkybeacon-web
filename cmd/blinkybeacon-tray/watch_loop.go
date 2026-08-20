@@ -26,20 +26,32 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 		status := WatchOff
 
 		target, err := stateSourceURL(c.DashboardURL, c.LineNumber)
+		unbound := WatchStatus("")
 		switch {
 		case err != nil:
-			// Not configured (or misconfigured). Stay out of the way entirely:
-			// the tray's manual Spin/Flash/Stop must still mean something.
-			status = WatchOff
-			lastTarget = ""
+			// Not configured, or misconfigured.
+			unbound = WatchOff
 		case strings.TrimSpace(c.APIToken) == "":
 			// The read API has no anonymous tier, so a poll without a token can
 			// only ever come back 401. Don't make the request: an unbound
 			// watcher is quiet, and says why rather than reporting a feed it
 			// never asked for as lost.
-			status = WatchNoToken
-			lastTarget = ""
-		default:
+			unbound = WatchNoToken
+		}
+
+		if unbound != "" {
+			// An unbound watcher stays out of the way: the tray's manual
+			// Spin/Flash/Stop must still mean something. But if we were
+			// DRIVING when the binding went away, hand the beacon back dark
+			// first — a light left spinning on a level nobody is watching any
+			// more is the confident wrong light, reached by the back door.
+			// Exactly once, so the manual controls stick afterwards.
+			if lastTarget != "" {
+				applyState(app, StateIdle)
+				lastTarget = ""
+			}
+			status = unbound
+		} else {
 			if target != lastTarget {
 				// Retargeted. Whatever the previous line was doing is not ours
 				// any more — start from no assumptions.

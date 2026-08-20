@@ -48,9 +48,11 @@ The tray menu's top line tells you whether the beacon was found:
 The watcher picks changes up on its next poll — no restart. Until a token is
 saved the tray will say `○ Dashboard: no token set`, and nothing is polled.
 
-To turn the watcher off again, blank the Dashboard URL and save. The beacon
-then does nothing until you drive it by hand from the tray menu (Spin / Flash /
-Stop), which stays available at all times.
+To turn the watcher off again, blank the Dashboard URL and save (or forget the
+token — see below). **The beacon goes dark as it lets go**, so it can never be
+left spinning on a pause nobody is watching any more. After that it does
+nothing until you drive it by hand from the tray menu (Spin / Flash / Stop),
+which stays available at all times.
 
 ## 3. Get a token, and paste it in
 
@@ -200,7 +202,8 @@ app mid-pause immediately spins.
 
 - **The manual controls still work** while the watcher is running, but the
   watcher will correct the light on its next poll — it decides from the
-  dashboard, every time.
+  dashboard, every time. Unbind it (blank the URL, or forget the token) and it
+  hands the beacon back dark, once, and then leaves it to you.
 
 ## 7. What this version does not do
 

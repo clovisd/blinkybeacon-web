@@ -990,3 +990,83 @@ func TestAppState_watchLineRoundTrips(t *testing.T) {
 		t.Errorf("WatchLine = %d, want 6", got)
 	}
 }
+
+func TestWatchLoop_handsTheBeaconBackDarkWhenTheTokenIsCleared(t *testing.T) {
+	// Unbinding mid-pause must not leave the beacon spinning on a level nobody
+	// is watching any more. That is the confident wrong light, arrived at by
+	// the back door.
+	stub := newStubDashboard(pausedPayload)
+	srv := httptest.NewServer(stub)
+	defer srv.Close()
+
+	app := NewAppState()
+	app.SetBeacon(&countingBeacon{})
+
+	var mu sync.Mutex
+	cfg := Config{DashboardURL: srv.URL, LineNumber: 1, APIToken: testToken}
+	get := func() Config {
+		mu.Lock()
+		defer mu.Unlock()
+		return cfg
+	}
+	startWatchLoop(t, app, srv.Client(), get, 5*time.Millisecond)
+
+	waitFor(t, "the beacon to spin", func() bool {
+		state, _, _ := app.Get()
+		return state == StateSpin
+	})
+
+	mu.Lock()
+	cfg.APIToken = "" // the operator ticks "forget the saved token"
+	mu.Unlock()
+
+	waitFor(t, "the beacon to be handed back dark", func() bool {
+		state, _, _ := app.Get()
+		return state == StateIdle && app.WatchStatus() == WatchNoToken
+	})
+}
+
+func TestWatchLoop_releasesTheBeaconOnceAndThenLeavesItAlone(t *testing.T) {
+	// Handing the beacon back is a one-off, not a policy: once unbound, the
+	// operator's manual control has to stick.
+	stub := newStubDashboard(pausedPayload)
+	srv := httptest.NewServer(stub)
+	defer srv.Close()
+
+	app := NewAppState()
+	b := &countingBeacon{}
+	app.SetBeacon(b)
+
+	var mu sync.Mutex
+	cfg := Config{DashboardURL: srv.URL, LineNumber: 1, APIToken: testToken}
+	get := func() Config {
+		mu.Lock()
+		defer mu.Unlock()
+		return cfg
+	}
+	startWatchLoop(t, app, srv.Client(), get, 5*time.Millisecond)
+
+	waitFor(t, "the beacon to spin", func() bool {
+		state, _, _ := app.Get()
+		return state == StateSpin
+	})
+
+	mu.Lock()
+	cfg.DashboardURL = "" // the operator blanks the URL
+	mu.Unlock()
+
+	waitFor(t, "the beacon to be handed back dark", func() bool {
+		state, _, _ := app.Get()
+		return state == StateIdle && app.WatchStatus() == WatchOff
+	})
+
+	// Now the operator drives it by hand. The unbound watcher must not fight.
+	applyState(app, StateSpin)
+	time.Sleep(40 * time.Millisecond)
+	if state, _, _ := app.Get(); state != StateSpin {
+		t.Errorf("state = %q, want spin — an unbound watcher must not stomp manual control", state)
+	}
+	if b.stops != 1 {
+		t.Errorf("Stop called %d times, want exactly 1 — the release is a one-off", b.stops)
+	}
+}
