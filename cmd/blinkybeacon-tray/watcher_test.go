@@ -769,6 +769,41 @@ func TestFetchLineState_nullDraftCompleteIsNotFalse(t *testing.T) {
 	}
 }
 
+func TestFetchLineState_decodesTheDashboardsOwnTenKeyExample(t *testing.T) {
+	// Byte for byte from the dashboard side's spec §2.2 ("The projection — ten
+	// keys, and the absences are a fence"), as it stands on wt/draft-complete.
+	// Their §2.2 example carries draft_complete null, which is the case this
+	// tray is most likely to get wrong: null must survive as null.
+	const theirs = `{"v": 0, "n": 3, "label": "Line C", "running": true,
+ "match_id": null,
+ "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+ "paused": false, "seconds_since_gsi": 0.8, "ts": 1765500000,
+ "draft_complete": null}`
+	srv := servePayload(t, theirs)
+
+	ls, err := fetchLineState(context.Background(), srv.Client(), srv.URL, 3, "tok")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ls.DraftComplete != nil {
+		t.Errorf("DraftComplete = %v, want nil", *ls.DraftComplete)
+	}
+	// The other nine keys still land, so a tenth field cannot have shifted
+	// anything underneath it.
+	if ls.V != 0 || ls.N != 3 || ls.Label != "Line C" || !ls.Running {
+		t.Errorf("envelope decoded wrong: %+v", ls)
+	}
+	if ls.MatchID != nil {
+		t.Errorf("MatchID = %q, want nil", *ls.MatchID)
+	}
+	if ls.GameState != "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS" || ls.Paused {
+		t.Errorf("game_state/paused decoded wrong: %+v", ls)
+	}
+	if ls.SecondsSinceGSI == nil || *ls.SecondsSinceGSI != 0.8 || ls.TS != 1765500000 {
+		t.Errorf("seconds_since_gsi/ts decoded wrong: %+v", ls)
+	}
+}
+
 func TestFetchLineState_absentDraftCompleteDecodesTheSameAsNull(t *testing.T) {
 	// An older dashboard does not publish the key at all. That tray must reach
 	// exactly the same conclusion as it does for an explicit null — unknown —
