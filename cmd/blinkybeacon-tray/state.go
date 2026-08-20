@@ -32,6 +32,7 @@ type AppState struct {
 	beacon      Beacon
 	listenAddr  atomic.Value // stores string
 	watchStatus atomic.Value // stores WatchStatus
+	watchDetail atomic.Value // stores WatchDetail
 	watchLine   atomic.Int64 // the line number the watcher is bound to
 }
 
@@ -89,6 +90,21 @@ func (a *AppState) WatchStatus() WatchStatus {
 		return v.(WatchStatus)
 	}
 	return WatchOff
+}
+
+// SetWatchDetail records the extra facts the tray's words need beyond the
+// status value — how quiet the feed has gone, and whether any draft data is
+// coming at all.
+func (a *AppState) SetWatchDetail(d WatchDetail) {
+	a.watchDetail.Store(d)
+}
+
+// WatchDetail returns those facts; the zero detail until the watcher runs.
+func (a *AppState) WatchDetail() WatchDetail {
+	if v := a.watchDetail.Load(); v != nil {
+		return v.(WatchDetail)
+	}
+	return WatchDetail{}
 }
 
 // SetWatchLine records which line the watcher is currently bound to, so the

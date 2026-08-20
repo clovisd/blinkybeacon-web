@@ -109,7 +109,7 @@ func TestIntegration_namesAnUnknownLine(t *testing.T) {
 		return state == StateIdle && app.WatchStatus() == WatchNoLine
 	})
 	t.Logf("line 99999: status=%q label=%q", app.WatchStatus(),
-		watchStatusLabel(app.WatchStatus(), app.WatchLine()))
+		watchStatusLabel(app.WatchStatus(), app.WatchLine(), app.WatchDetail()))
 }
 
 func TestIntegration_goesDarkAndSaysTokenRejectedAfterARevoke(t *testing.T) {

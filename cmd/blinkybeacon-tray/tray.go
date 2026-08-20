@@ -64,8 +64,7 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 		var lastState StateValue
 		var lastConnected bool
 		var lastAddr string
-		var lastWatch WatchStatus = "\x00" // force the first render
-		lastWatchLine := -1
+		lastWatchLabel := "\x00" // force the first render
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -76,12 +75,14 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 					lastAddr = addr
 					mHTTP.SetTitle("HTTP: " + addr)
 				}
-				// The line number is part of the label ("line 7 not found"),
-				// so a retarget has to redraw it even if the status held.
-				ws, wl := state.WatchStatus(), state.WatchLine()
-				if ws != lastWatch || wl != lastWatchLine {
-					lastWatch, lastWatchLine = ws, wl
-					mWatch.SetTitle(watchStatusLabel(ws, wl))
+				// Compare the rendered words, not the status: the line number
+				// ("line 7 not found"), how long a feed has been quiet, and
+				// the missing-draft-data warning all move underneath a status
+				// that has not changed. Redraw exactly when the words change.
+				watch := watchStatusLabel(state.WatchStatus(), state.WatchLine(), state.WatchDetail())
+				if watch != lastWatchLabel {
+					lastWatchLabel = watch
+					mWatch.SetTitle(watch)
 				}
 				if sv == lastState && connected == lastConnected {
 					continue
