@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -1240,5 +1241,63 @@ func TestSaveConfig_tightensAnAlreadyWorldReadableConfig(t *testing.T) {
 	}
 	if mode := fi.Mode().Perm(); mode != 0o600 {
 		t.Errorf("config file mode = %#o, want 0600 after re-saving over an old 0644 file", mode)
+	}
+}
+
+func TestSaveConfig_neverWritesTheTokenIntoTheOldWorldReadableFile(t *testing.T) {
+	// Narrowing the mode AFTER the write still exposes the credential for as
+	// long as the write takes: os.WriteFile truncates the existing 0644 file in
+	// place and puts the token in it, and only then does Chmod narrow it. The
+	// fix is to write a fresh 0600 file and rename it over the old one, so the
+	// old inode never holds the token at all — which is what this asserts.
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file modes and inodes are not the mechanism on Windows")
+	}
+	withTempConfig(t)
+	path, err := configFilePath()
+	if err != nil {
+		t.Fatalf("configFilePath: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"addr":"127.0.0.1","port":1337,"line_number":1}`), 0o644); err != nil {
+		t.Fatalf("seeding an old config: %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	if err := saveConfig(Config{Addr: defaultAddr, Port: defaultPort, LineNumber: 1, APIToken: "minted-token"}); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if os.SameFile(before, after) {
+		t.Error("the world-readable file was written in place — the token was exposed for the length of the write")
+	}
+	if mode := after.Mode().Perm(); mode != 0o600 {
+		t.Errorf("config file mode = %#o, want 0600", mode)
+	}
+}
+
+func TestSaveConfig_leavesNoTemporaryFilesBehind(t *testing.T) {
+	withTempConfig(t)
+	if err := saveConfig(Config{Addr: defaultAddr, Port: defaultPort, LineNumber: 1, APIToken: "minted-token"}); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	path, err := configFilePath()
+	if err != nil {
+		t.Fatalf("configFilePath: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(path) {
+			t.Errorf("stray file left next to the config: %q", e.Name())
+		}
 	}
 }

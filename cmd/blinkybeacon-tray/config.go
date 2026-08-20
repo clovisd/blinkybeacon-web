@@ -95,12 +95,33 @@ func saveConfig(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, configFileMode); err != nil {
+	// Write a NEW owner-only file and rename it over the old one, rather than
+	// truncating the old one in place.
+	//
+	// os.WriteFile's mode only applies when it CREATES the file, so writing
+	// over the 0644 config a pre-token build left behind would put the
+	// credential in a world-readable file and only narrow it afterwards —
+	// a window any local process can sit and wait for. A fresh 0600 file plus
+	// an atomic rename has no such window, and as a bonus no reader ever sees
+	// a half-written config.
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".blinkybeacon-config-*.tmp")
+	if err != nil {
 		return err
 	}
-	// WriteFile's mode only applies when it CREATES the file, so upgrading from
-	// a build that predates the token would otherwise leave the credential in
-	// the 0644 file that build left behind. On Windows this only touches the
-	// read-only bit, which is harmless.
-	return os.Chmod(path, configFileMode)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // a no-op once the rename below has succeeded
+
+	if err := tmp.Chmod(configFileMode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
