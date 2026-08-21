@@ -6,21 +6,31 @@ The tray app can watch a LIVE Dashboard line and drive the beacon by itself:
 - **The game is paused → the beacon spins amber, for as long as the pause lasts.**
 - **Anything else → the beacon is dark.**
 
-"The draft ends" means exactly what the owner ruled it means:
+**"The draft ends" is read off the dashboard, whichever way it can see it —
+and no cfg needs reinstalling for that to work.**
+
+The beacon flashes at the **end of the pick/ban phase as the dashboard sees
+it**: the moment the game state leaves hero selection, which is the same moment
+the dashboard's own action log records as **"Draft → Strategy"**. That is
+derived from data every line already sends, so **every existing install flashes,
+with nothing to reinstall and nothing to configure.**
+
+Where a line *does* publish draft detail, the beacon uses the sharper moment
+instead — the **last final pick** of the pick/ban phase, the owner's ruling:
 
 > "'Draft ended' means when all picks and bans have completed, not when players
 > have picked their assigned hero from the drafted bunch. We want to flash for
 > 15 seconds right when the last final pick is done in the pick/ban phase."
 
-So the beacon fires the moment all ten pick slots are filled — the last final
-pick of the pick/ban phase — **not** when the hero-selection screen goes away.
-In Captains Mode those are minutes apart, and the second one is the wrong
-moment.
+**Whichever of the two comes first flashes, once per match.** The tray says
+which one is in play on that line — `draft timing: picks` or
+`draft timing: game state`. Both flash; neither is broken.
 
-> **You must reinstall the tracked PC's cfg for this to work.** Once the
-> dashboard is on v3.99.0 or later, re-run that PC's install link from the
-> dashboard; until you do, the tray says `no draft data (reinstall cfg)` and the
-> beacon will not flash at the draft.
+> Optional, not required: reinstalling the tracked PC's cfg from its install
+> link on a dashboard running v3.99.0 or later makes the flash land at the last
+> final pick itself rather than at the end of hero selection. In Captains Mode
+> that is the difference between the pick and the choose-your-hero stretch that
+> follows it. Everything works without doing this.
 
 It polls the dashboard every 2 seconds over the dashboard's read API,
 `/api/v0/lines/<N>`, using an **API token** that a dashboard admin mints for
@@ -132,7 +142,7 @@ Some things worth knowing about the token:
 
 | Beacon | Means |
 |---|---|
-| **Flashing red, ~15 seconds** | The last final pick just landed — the draft is done. |
+| **Flashing red, ~15 seconds** | The pick/ban phase just ended — the draft is done. |
 | **Spinning amber** | The game is paused, right now. It stops when play resumes. |
 | **Dark** | Nothing is happening — **or** the dashboard feed is gone. Check the tray. |
 
@@ -154,8 +164,8 @@ And below it, what the feed is doing on that line:
 |---|---|
 | `○ Dashboard: not configured` | No dashboard URL set. The watcher is off. |
 | `○ Dashboard: no token set` | URL set, but no API token. **Nothing is being polled at all** — see [section 3](#3-get-a-token-and-paste-it-in). |
-| `● Dashboard: watching` | Polling fine, feed is fresh. Trust the light. |
-| `● Dashboard: watching · no draft data (reinstall cfg)` | Polling fine, but this line is publishing no draft information, so **the beacon will not flash at the draft**. Reinstall the tracked PC's cfg from its install link — see [section 5](#5-if-it-isnt-working). |
+| `● Dashboard: watching · draft timing: picks` | Polling fine, feed is fresh. This line publishes draft detail, so the flash lands at the **last final pick**. Trust the light. |
+| `● Dashboard: watching · draft timing: game state` | Polling fine, feed is fresh. This line publishes no draft detail, so the flash lands when the game state **leaves hero selection**. **Nothing is wrong and nothing needs reinstalling** — see [section 5](#5-if-it-isnt-working). |
 | `▲ Dashboard: token rejected` | The dashboard refused the token: it was revoked, expired, or mistyped. Mint a new one and paste it in. |
 | `▲ Dashboard: line 2 not found` | Token accepted, but that line number doesn't exist (or isn't an official line). Reopen Settings and pick the line from the list. |
 | `○ Dashboard: idle — no game data yet` | Dashboard reached and the line is running, but it has never heard from Dota since it started. **Nothing is wrong** — there is just no game on this line yet. |
@@ -207,25 +217,30 @@ URL for it, not its position in the list.
   `token rejected`) on a URL you can open in a browser usually means the
   dashboard is older than the `/api/v0/lines/` route. Update the dashboard.
 
-**`● watching · no draft data (reinstall cfg)`**
+**`● watching · draft timing: game state`**
 
-The dashboard is answering and the line is fine — it just isn't publishing
-anything about the draft, so the beacon has nothing to flash at. Everything
-else, including the pause light, keeps working.
+Not a fault, and **not something to fix**. It means this line publishes no
+per-pick draft detail, so the beacon flashes when the game state leaves hero
+selection instead — the same moment the dashboard's action log calls
+"Draft → Strategy". The flash, the pause light and everything else work
+normally.
 
-Fix it on the **tracked PC**, not on the beacon PC: open that PC's install link
-from the dashboard and run it again, so its Dota cfg is rewritten by the newer
-dashboard. Until that is done — or if the dashboard is older than v3.99.0 — this
-warning stays up, which is the point: you learn the beacon can't flash at the
-draft **before** the draft rather than by watching it not happen.
+If you would rather have the flash at the last final pick itself, and the
+dashboard is on v3.99.0 or later, re-run the **tracked PC's** install link from
+the dashboard so its Dota cfg is rewritten. That is a refinement, not a repair.
 
 **The beacon didn't flash at the draft**
 
-- Check the tray said `● watching` with no `no draft data` warning, at the time.
-- The tray only flashes on the **change** from "picks outstanding" to "all picks
-  in". If the tray was started (or retargeted, or lost the feed) after the last
-  pick had already landed, it never saw the change and deliberately stays dark
-  — announcing a moment that has already passed is worse than saying nothing.
+- Check the tray said `● watching` at the time — any other line means it wasn't
+  watching that line when the draft ended.
+- The tray only flashes on the **change**: "picks outstanding" → "all picks in",
+  or hero selection → whatever comes after it. If the tray was started (or
+  retargeted, or lost the feed) after the draft had already ended, it never saw
+  the change and deliberately stays dark — announcing a moment that has already
+  passed is worse than saying nothing.
+- **One flash per match**, so if it already flashed at the last pick it will not
+  flash again when hero selection ends a moment later. That is the same flash,
+  not a missed one.
 
 **Beacon dark, tray says `watching`, and a game is clearly on**
 
@@ -254,9 +269,14 @@ app mid-pause immediately spins.
 - **A pause outranks the flash.** If a pause begins during the 15-second flash,
   the beacon switches straight to spinning, and does not go back to flashing
   when the pause lifts.
-- **The draft flash fires once per match.** "All picks in" stays true for the
-  rest of the game, so later polls don't re-flash; a new match starts the
-  detector over.
+- **The draft flash fires once per match, whichever trigger comes first.** The
+  last pick and the end of hero selection are two views of the same moment; the
+  first one seen spends the match's flash and the second is ignored. "All picks
+  in" also stays true for the rest of the game, so later polls don't re-flash.
+  A new match starts the detector over.
+- **A null game state is never treated as the draft ending.** If the dashboard
+  briefly can't see Dota's state, the watcher does not flash on the way into or
+  out of that gap — same rule as a dropped feed.
 - **A rejected token backs the polling off to 30 seconds.** Every other state
   keeps the normal 2-second cadence.
 - **A dashboard restart shows `idle — no game data yet` until Dota next checks
