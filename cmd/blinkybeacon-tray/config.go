@@ -2,13 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 )
 
-// Config holds runtime settings persisted to blinkybeacon-config.json
-// in the same directory as the executable.
+// Config holds runtime settings persisted to blinkybeacon-config.json —
+// beside the executable on Windows, in the user's config directory elsewhere
+// (see defaultConfigDir).
 type Config struct {
 	Addr string `json:"addr"`
 	Port int    `json:"port"`
@@ -17,15 +17,9 @@ type Config struct {
 const defaultAddr = "127.0.0.1"
 const defaultPort = 1337
 
-// configDir is where the config file lives: beside the executable.
+// configDir is where the config file lives, per platform.
 // A variable so tests can point it somewhere disposable.
-var configDir = func() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine executable path: %w", err)
-	}
-	return filepath.Dir(exe), nil
-}
+var configDir = defaultConfigDir
 
 func configFilePath() (string, error) {
 	dir, err := configDir()
@@ -63,7 +57,7 @@ func loadConfig() Config {
 // the control API is bound to, and forks of this app keep credentials in it.
 const configFileMode = 0o600
 
-// saveConfig writes cfg to the config file next to the executable.
+// saveConfig writes cfg to the config file.
 func saveConfig(cfg Config) error {
 	path, err := configFilePath()
 	if err != nil {

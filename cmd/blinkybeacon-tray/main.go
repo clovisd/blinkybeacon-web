@@ -1,4 +1,4 @@
-//go:build windows
+//go:build windows || darwin
 
 package main
 
@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os/exec"
 	"time"
 
 	"github.com/duckfullstop/blinkybeacon/pkg/fsbeacon"
@@ -137,7 +136,9 @@ func main() {
 		},
 		OnSettings: func() {
 			addr := appState.ListenAddr()
-			exec.Command("rundll32", "url.dll,FileProtocolHandler", "http://"+addr+"/settings").Start()
+			if err := openBrowser("http://" + addr + "/settings"); err != nil {
+				log.Printf("Could not open the settings page: %v", err)
+			}
 		},
 		OnQuit: func() {
 			// Capture and clear the beacon atomically so the USB retry loop exits cleanly.
