@@ -51,10 +51,10 @@ func sirenIcon(fill color.RGBA) []byte {
 		}
 	}
 
-	// Encode to PNG then wrap in ICO
+	// Encode to PNG, then into whatever container this platform's tray wants.
 	var buf bytes.Buffer
 	png.Encode(&buf, img)
-	return wrapPNGInICO(buf.Bytes())
+	return trayIconBytes(buf.Bytes())
 }
 
 var (

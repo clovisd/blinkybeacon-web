@@ -8,15 +8,15 @@ _A set of utilities for working with beacon lights, currently just the USB one i
 
 ## blinkybeacon-tray
 
-A Windows system tray app that:
+A system tray / menu bar app for Windows and macOS that:
 
 - Owns the USB HID connection to the beacon (sole process — the beacon can only be opened by one program at a time)
 - Runs an HTTP server (default `127.0.0.1:1337`) controllable from Companion, scripts, or any HTTP client
 - Provides a right-click tray menu with Spin / Flash / Stop controls
 - Shows beacon state in the tray icon tooltip
 - Configurable bind address and port — supports multiple instances on different ports
-- Settings UI accessible from the tray menu (opens in browser)
-- Optional auto-start at Windows login via registry
+- Settings UI accessible from the tray menu (opens in browser) — it also documents the HTTP API
+- Optional start at login (Windows: registry `Run` key · macOS: a LaunchAgent)
 - **Watches a LIVE Dashboard line** and drives the beacon by itself — flash for
   15 seconds when the draft ends, spin for the duration of any pause.
   **No cfg reinstall is required:** the flash fires at the end of the pick/ban
@@ -39,26 +39,34 @@ A Windows system tray app that:
 
 ### Download
 
-Pre-built `.exe` available on the [Releases](../../releases) page.
+Pre-built binaries are on the [Releases](../../releases) page (this branch's
+releases are tagged `dashboard-v*`):
 
-### Build (cross-compile from Linux/WSL2)
+| File | Platform |
+|---|---|
+| `blinkybeacon-tray.exe` | Windows x64 |
+| `blinkybeacon-tray-macos-arm64.zip` | macOS, Apple Silicon (`BlinkyBeacon.app` + bare binary) |
+| `blinkybeacon-tray-macos-amd64.zip` | macOS, Intel |
 
-```bash
-GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
-  go build -ldflags="-H windowsgui" -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
-```
+Every file ships with a `.sha256` beside it. The macOS builds are not signed or
+notarized: on first launch right-click → Open, or
+`xattr -dr com.apple.quarantine BlinkyBeacon.app`. See [BUILD_MACOS.md](BUILD_MACOS.md).
 
-Requires `gcc-mingw-w64-x86-64` (`sudo apt install gcc-mingw-w64-x86-64`).
+### Build
 
-### Build (Windows native)
+- **Windows** — [BUILD_WINDOWS.md](BUILD_WINDOWS.md): cross-compile from Linux/WSL2 with
+  mingw (the line releases use, reproducible hash) or build natively.
+- **macOS** — [BUILD_MACOS.md](BUILD_MACOS.md): build on a Mac, or let the
+  [build workflow](.github/workflows/build.yml) do it on a macOS runner. It cannot be
+  cross-compiled from Linux (cgo needs the Apple SDK).
 
-```powershell
-go build -ldflags="-H windowsgui" -o blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
-```
+The workflow builds all three on every push to `dashboard` and attaches them to the
+release on a `dashboard-v*` tag.
 
 ### Configuration
 
-**Tray menu → Settings…** opens a browser-based settings page where you can change the bind address and port, and point the dashboard watcher at a dashboard URL, line number and API token. Settings are saved to `blinkybeacon-config.json` next to the `.exe` and applied immediately (HTTP server restarts on the new address; the watcher retargets on its next poll).
+**Tray menu → Settings…** opens a browser-based settings page where you can change the bind address and port, and point the dashboard watcher at a dashboard URL, line number and API token. Settings are saved to `blinkybeacon-config.json` — next to the `.exe` on Windows, in
+`~/Library/Application Support/BlinkyBeacon/` on macOS — and applied immediately (HTTP server restarts on the new address; the watcher retargets on its next poll).
 
 > The settings page has no authentication and can be bound to `0.0.0.0`, so the dashboard API token is **never rendered back into the page** — the field always comes up empty, and leaving it blank keeps the saved value. Saving requires a CSRF token from the form the app served, so a page the operator merely visits cannot repoint the watcher (and its credential) at another host; changing the dashboard URL drops the saved token for the same reason. The token is stored in plain text in `blinkybeacon-config.json`, because it has to be sent on every poll; treat that file as a secret.
 

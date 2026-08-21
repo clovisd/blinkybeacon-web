@@ -22,7 +22,7 @@ const settingsFormHTML = `<!DOCTYPE html>
 <title>BlinkyBeacon Settings</title>
 <style>
 *{box-sizing:border-box}
-body{font-family:system-ui,sans-serif;max-width:420px;margin:48px auto;padding:0 24px;color:#1a1a1a}
+body{font-family:system-ui,sans-serif;max-width:560px;margin:48px auto;padding:0 24px;color:#1a1a1a}
 h1{font-size:1.25em;margin-bottom:24px}
 h2{font-size:1.05em;margin:26px 0 14px;padding-top:18px;border-top:1px solid #e5e5e5}
 .field{margin-bottom:18px}
@@ -35,6 +35,13 @@ select option:disabled{color:#999}
 .clear input{width:auto;margin-right:6px;vertical-align:-1px}
 button{background:#0078d4;color:#fff;border:none;padding:9px 22px;font-size:1em;border-radius:4px;cursor:pointer;margin-top:8px}
 button:hover{background:#106ebe}
+table{width:100%%;border-collapse:collapse;font-size:.875em;margin:12px 0}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top}
+th{font-weight:600;color:#444}
+code,pre{font-family:ui-monospace,Consolas,monospace;font-size:.9em}
+code{background:#f3f3f3;padding:1px 4px;border-radius:3px}
+pre{background:#f3f3f3;padding:10px 12px;border-radius:4px;overflow-x:auto}
+.api p{font-size:.875em;color:#444;margin:8px 0}
 </style>
 </head>
 <body>
@@ -66,8 +73,37 @@ button:hover{background:#106ebe}
 %s
 <button type="submit">Save &amp; Apply</button>
 </form>
+%s
 </body>
 </html>`
+
+// apiDocsHTMLTmpl documents the control API. It is rendered with the live base
+// URL so the examples are copy-pasteable, not placeholders. Every route here
+// is a contract: the Bitfocus Companion module (clovisd/blinkybeacon-companion)
+// drives /spin, /flash and /stop and polls /status, all unauthenticated, so
+// none of them may change shape, grow a login, or move — on this branch as
+// much as on the generic one.
+const apiDocsHTMLTmpl = `<section class="api">
+<h2>HTTP API</h2>
+<p>Anything that can make an HTTP request can drive the beacon. The server is listening on <code>%[1]s</code>. No authentication; bind to <code>127.0.0.1</code> unless other machines need control.</p>
+<table>
+<tr><th>Method</th><th>Path</th><th>What it does</th></tr>
+<tr><td><code>POST</code></td><td><code>/spin</code></td><td>Start the rotating light.</td></tr>
+<tr><td><code>POST</code></td><td><code>/flash</code></td><td>Start the strobe.</td></tr>
+<tr><td><code>POST</code></td><td><code>/stop</code></td><td>Turn the light off.</td></tr>
+<tr><td><code>GET</code></td><td><code>/status</code></td><td>Current state and whether a beacon is plugged in.</td></tr>
+<tr><td><code>GET</code></td><td><code>/settings</code></td><td>This page.</td></tr>
+</table>
+<p>Every route answers JSON. The three control routes and <code>/status</code> all return the same shape:</p>
+<pre>{"state": "idle" | "spin" | "flash", "connected": true | false}</pre>
+<p>A control request while no beacon is connected answers <code>503</code> with <code>{"error": "beacon not connected"}</code>; if the beacon drops mid-command it answers <code>503</code> with <code>{"error": "beacon disconnected"}</code> and the app starts looking for it again. A wrong method answers <code>405</code>.</p>
+<pre>curl -X POST %[1]s/spin
+curl -X POST %[1]s/flash
+curl -X POST %[1]s/stop
+curl %[1]s/status</pre>
+<p><strong>While the dashboard watcher is bound to a line it drives the light itself.</strong> These routes still work, but the watcher corrects the light on its next poll — it decides from the dashboard, every time. Blank the dashboard URL (or forget the token) to hand the beacon back to manual control.</p>
+<p>The <a href="https://github.com/clovisd/blinkybeacon-companion">Bitfocus Companion module</a> uses exactly these routes, polling <code>/status</code> every two seconds.</p>
+</section>`
 
 const settingsSavedHTML = `<!DOCTYPE html>
 <html>
@@ -130,6 +166,25 @@ func (h *settingsHandler) csrfOK(got string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
+// apiBaseURL is the address a CLIENT calls. 0.0.0.0 is what you bind, not
+// what you connect to, so the examples fall back to loopback for it.
+func apiBaseURL(cfg Config) string {
+	host := cfg.Addr
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		host = defaultAddr
+	}
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]" // a bare IPv6 literal needs brackets in a URL
+	}
+	return fmt.Sprintf("http://%s:%d", host, cfg.Port)
+}
+
+// apiDocsHTML renders the API section for the saved config. The base URL is
+// derived from the user-supplied bind address, so it is escaped like the rest.
+func apiDocsHTML(cfg Config) string {
+	return fmt.Sprintf(apiDocsHTMLTmpl, html.EscapeString(apiBaseURL(cfg)))
+}
+
 func (h *settingsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 	cfg := loadConfig()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -145,7 +200,8 @@ func (h *settingsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 		html.EscapeString(cfg.Addr), cfg.Port,
 		html.EscapeString(cfg.DashboardURL), h.lineField(cfg),
 		html.EscapeString(placeholder), hint,
-		beaconLightFields(cfg))
+		beaconLightFields(cfg),
+		apiDocsHTML(cfg))
 }
 
 // tokenFieldText is what the token field says about the stored token without

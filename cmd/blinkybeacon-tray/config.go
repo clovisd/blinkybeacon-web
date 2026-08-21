@@ -2,13 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 )
 
-// Config holds runtime settings persisted to blinkybeacon-config.json
-// in the same directory as the executable.
+// Config holds runtime settings persisted to blinkybeacon-config.json —
+// beside the executable on Windows, in the user's config directory elsewhere
+// (see defaultConfigDir).
 type Config struct {
 	Addr string `json:"addr"`
 	Port int    `json:"port"`
@@ -92,14 +92,10 @@ const defaultPort = 1337
 const defaultLineNumber = 1
 
 // configDir is where blinkybeacon-config.json lives: next to the executable.
+// configDir is where the config file lives, per platform (beside the .exe on
+// Windows, ~/Library/Application Support/BlinkyBeacon on macOS).
 // A variable so tests can point it somewhere disposable.
-var configDir = func() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine executable path: %w", err)
-	}
-	return filepath.Dir(exe), nil
-}
+var configDir = defaultConfigDir
 
 func configFilePath() (string, error) {
 	dir, err := configDir()

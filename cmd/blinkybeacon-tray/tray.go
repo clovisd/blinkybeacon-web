@@ -1,4 +1,4 @@
-//go:build windows
+//go:build windows || darwin
 
 package main
 
@@ -48,16 +48,16 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 
 	systray.AddSeparator()
 
-	mSpin  := systray.AddMenuItem("Spin",  "Start spinning the beacon")
+	mSpin := systray.AddMenuItem("Spin", "Start spinning the beacon")
 	mFlash := systray.AddMenuItem("Flash", "Start flashing the beacon")
-	mStop  := systray.AddMenuItem("Stop",  "Stop the beacon")
+	mStop := systray.AddMenuItem("Stop", "Stop the beacon")
 	mSpin.Disable()
 	mFlash.Disable()
 	mStop.Disable()
 
 	systray.AddSeparator()
 
-	mStartup := systray.AddMenuItem("Start at Windows startup", "")
+	mStartup := systray.AddMenuItem(startupMenuLabel, "")
 	if IsStartupEnabled() {
 		mStartup.Check()
 	}

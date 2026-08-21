@@ -1,0 +1,113 @@
+# Builds blinkybeacon-tray for every platform it ships on, on every push to a
+# release branch, and attaches the binaries to the GitHub release on a tag.
+#
+# Windows is cross-compiled from Linux with mingw — the same line as
+# BUILD_WINDOWS.md, so the CI .exe hashes the same as a local one from the same
+# commit. macOS cannot be cross-compiled from Linux (systray needs Cocoa and
+# go-hid needs IOKit, both through cgo), so it builds on a macOS runner; the
+# Apple Silicon runner produces both arm64 and amd64 from one toolchain.
+name: build
+
+on:
+  push:
+    branches: [main, dashboard]
+    tags: ['v*', 'dashboard-v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: windows/amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: mingw toolchain
+        run: sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64
+      - name: test
+        run: go test -count=1 -race ./cmd/blinkybeacon-tray/
+      - name: build
+        run: |
+          mkdir -p dist
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
+            go build -trimpath -ldflags='-H windowsgui -buildid=' \
+            -o dist/blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
+          file dist/blinkybeacon-tray.exe
+          (cd dist && sha256sum blinkybeacon-tray.exe | tee blinkybeacon-tray.exe.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blinkybeacon-tray-windows-amd64
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: macos/${{ matrix.arch }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, amd64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: test
+        # Runs natively on the runner's own architecture; the amd64 matrix leg
+        # only builds — Rosetta is not a reason to run the suite twice.
+        if: matrix.arch == 'arm64'
+        run: go test -count=1 -race ./cmd/blinkybeacon-tray/
+      - name: build
+        env:
+          CGO_ENABLED: "1"
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags='-buildid=' -o dist/blinkybeacon-tray ./cmd/blinkybeacon-tray/
+          file dist/blinkybeacon-tray
+      - name: bundle
+        run: |
+          BUNDLE_VERSION="${GITHUB_REF_NAME#*v}" scripts/macos-bundle.sh dist/blinkybeacon-tray dist/BlinkyBeacon.app
+          # zip keeps the executable bit; the artifact store does not.
+          (cd dist && zip -qr "blinkybeacon-tray-macos-${{ matrix.arch }}.zip" BlinkyBeacon.app blinkybeacon-tray)
+          (cd dist && shasum -a 256 "blinkybeacon-tray-macos-${{ matrix.arch }}.zip" | tee "blinkybeacon-tray-macos-${{ matrix.arch }}.zip.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blinkybeacon-tray-macos-${{ matrix.arch }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    name: attach to release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          files=$(find artifacts -type f \( -name '*.exe' -o -name '*.zip' -o -name '*.sha256' \))
+          echo "$files"
+          # A release cut by hand before the tag was pushed gets the files
+          # attached; a bare tag gets a prerelease to hang them on.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" $files --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" $files --prerelease --generate-notes --repo "$GITHUB_REPOSITORY"
+          fi
