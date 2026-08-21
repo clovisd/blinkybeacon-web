@@ -204,7 +204,7 @@ func TestSettingsForm_fallsBackToTheTypedNumberAndSaysWhy(t *testing.T) {
 
 			body := getSettings(t, &settingsHandler{client: client})
 
-			if strings.Contains(body, "<select") {
+			if strings.Contains(body, `<select id="line_number"`) {
 				t.Errorf("a picker was rendered from a list we never got:\n%s", body)
 			}
 			if !strings.Contains(body, `<input id="line_number" name="line_number" type="number" value="6"`) {
@@ -406,7 +406,7 @@ func TestSettingsForm_fallsBackWhenTheDashboardListsNoLines(t *testing.T) {
 
 	body := getSettings(t, &settingsHandler{client: srv.Client()})
 
-	if strings.Contains(body, "<select") {
+	if strings.Contains(body, `<select id="line_number"`) {
 		t.Errorf("an empty picker was rendered:\n%s", body)
 	}
 	if !strings.Contains(body, "no lines published") {
@@ -414,5 +414,276 @@ func TestSettingsForm_fallsBackWhenTheDashboardListsNoLines(t *testing.T) {
 	}
 	if !strings.Contains(body, `type="number" value="2"`) {
 		t.Errorf("the typed number input did not come back:\n%s", body)
+	}
+}
+
+// -------------------------------------------- the three beacon-light settings
+
+// beaconLightForm is a complete, valid submit of the whole form — the values a
+// browser actually sends. Individual tests override the one field under test.
+func beaconLightForm() url.Values {
+	return url.Values{
+		"addr":                {defaultAddr},
+		"port":                {"1337"},
+		"dashboard_url":       {""},
+		"line_number":         {"1"},
+		"flash_seconds":       {"15"},
+		"lobby_flash_seconds": {"10"},
+		"pause_side":          {pauseSideBoth},
+	}
+}
+
+func TestSettingsForm_rendersTheSavedBeaconLightSettings(t *testing.T) {
+	// (xi) Opening Settings must show what is actually saved — otherwise
+	// pressing Save to change the port would quietly reset the light.
+	withTempConfig(t)
+	cfg := defaultConfig()
+	cfg.FlashSeconds = 45
+	cfg.LobbyFlash = true
+	cfg.LobbyFlashSeconds = 7
+	cfg.PauseSide = pauseSideDire
+	saveConfig(cfg)
+
+	body := getSettings(t, &settingsHandler{})
+
+	for _, want := range []string{
+		`id="flash_seconds" name="flash_seconds" type="number" value="45"`,
+		`id="lobby_flash" name="lobby_flash" type="checkbox" value="1" checked`,
+		`id="lobby_flash_seconds" name="lobby_flash_seconds" type="number" value="7"`,
+		`<option value="dire" selected>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the settings form does not carry %s:\n%s", want, body)
+		}
+	}
+	// The saved side is the selected one, and only it.
+	if strings.Contains(body, `<option value="both" selected>`) {
+		t.Errorf("the pause-side picker pre-selected a side the operator did not save:\n%s", body)
+	}
+}
+
+func TestSettingsForm_rendersTheDefaultsOnAFreshInstall(t *testing.T) {
+	withTempConfig(t)
+
+	body := getSettings(t, &settingsHandler{})
+
+	for _, want := range []string{
+		`name="flash_seconds" type="number" value="15"`,
+		`name="lobby_flash_seconds" type="number" value="10"`,
+		`<option value="both" selected>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the settings form does not carry %s:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `type="checkbox" value="1" checked`) {
+		t.Errorf("the new-lobby flash came up ticked on a fresh install:\n%s", body)
+	}
+}
+
+func TestSettingsForm_saysTheSideFilterNeedsANewerDashboard(t *testing.T) {
+	// An operator who picks Radiant on a dashboard that does not publish
+	// pause_party gets a light that never spins for a pause again, with nothing
+	// on screen to explain it. One line on the page is the whole fix.
+	withTempConfig(t)
+
+	body := getSettings(t, &settingsHandler{})
+
+	if !strings.Contains(body, "pause_party") || !strings.Contains(body, "v3.101.0") {
+		t.Errorf("the pause-side control does not say which dashboard it needs:\n%s", body)
+	}
+}
+
+func TestSettingsPost_roundTripsAllThreeSettings(t *testing.T) {
+	// (xi) Into the file, and out to the watcher, in one submit.
+	withTempConfig(t)
+	h := &settingsHandler{}
+	saved := make(chan Config, 1)
+	h.onSave = func(c Config) { saved <- c }
+
+	form := beaconLightForm()
+	form.Set("flash_seconds", "45")
+	form.Set("lobby_flash", "1")
+	form.Set("lobby_flash_seconds", "7")
+	form.Set("pause_side", pauseSideRadiant)
+
+	if w := submitSettings(t, h, form); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	got := loadConfig()
+	if got.FlashSeconds != 45 || got.LobbyFlashSeconds != 7 {
+		t.Errorf("saved durations = %d/%d, want 45/7", got.FlashSeconds, got.LobbyFlashSeconds)
+	}
+	if !got.LobbyFlash {
+		t.Error("the new-lobby flash was not saved as on")
+	}
+	if got.PauseSide != pauseSideRadiant {
+		t.Errorf("saved PauseSide = %q, want %q", got.PauseSide, pauseSideRadiant)
+	}
+
+	select {
+	case c := <-saved:
+		// The same rebind the line picker uses: onSave is what main.go turns
+		// into restartCh, and restartCh is what rebuilds the watcher.
+		if c.FlashSeconds != 45 || !c.LobbyFlash || c.LobbyFlashSeconds != 7 || c.PauseSide != pauseSideRadiant {
+			t.Errorf("the rebind carried %+v, want the three settings just saved", c)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("saving the form did not trigger the watcher rebind")
+	}
+}
+
+func TestSettingsPost_anUntickedCheckboxTurnsTheLobbyFlashOff(t *testing.T) {
+	// A browser sends nothing at all for an unticked checkbox, so "absent" is
+	// the ONLY way off is ever expressed.
+	withTempConfig(t)
+	cfg := defaultConfig()
+	cfg.LobbyFlash = true
+	saveConfig(cfg)
+
+	form := beaconLightForm() // no lobby_flash key
+	if w := submitSettings(t, &settingsHandler{}, form); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	if loadConfig().LobbyFlash {
+		t.Error("LobbyFlash is still on — an unticked checkbox never turned it off")
+	}
+}
+
+func TestSettingsPost_rejectsAnOutOfRangeDuration(t *testing.T) {
+	// Rejected, not silently defaulted: the operator is watching, and telling
+	// them their 900 became 15 is the whole difference between a setting and a
+	// suggestion.
+	cases := []struct{ name, field, value string }{
+		{"a draft flash past the bound", "flash_seconds", "601"},
+		{"a draft flash of zero", "flash_seconds", "0"},
+		{"a negative draft flash", "flash_seconds", "-5"},
+		{"a lobby flash past the bound", "lobby_flash_seconds", "100000"},
+		{"a lobby flash that is not a number", "lobby_flash_seconds", "ten"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempConfig(t)
+			before := defaultConfig()
+			before.FlashSeconds = 20
+			before.LobbyFlashSeconds = 20
+			saveConfig(before)
+
+			form := beaconLightForm()
+			form.Set(tc.field, tc.value)
+			w := submitSettings(t, &settingsHandler{}, form)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 for %s=%q", w.Code, tc.field, tc.value)
+			}
+			if !strings.Contains(w.Body.String(), tc.field) {
+				t.Errorf("the refusal does not name the field:\n%s", w.Body.String())
+			}
+			// And nothing was written: a refused save must not half-apply.
+			if got := loadConfig(); got.FlashSeconds != 20 || got.LobbyFlashSeconds != 20 {
+				t.Errorf("a refused POST still changed the config: %d/%d, want 20/20",
+					got.FlashSeconds, got.LobbyFlashSeconds)
+			}
+		})
+	}
+}
+
+func TestSettingsPost_rejectsAnUnknownPauseSide(t *testing.T) {
+	for _, side := range []string{"Radiant", "team1", "none", "radiant;dire"} {
+		withTempConfig(t)
+		before := defaultConfig()
+		before.PauseSide = pauseSideDire
+		saveConfig(before)
+
+		form := beaconLightForm()
+		form.Set("pause_side", side)
+		w := submitSettings(t, &settingsHandler{}, form)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("pause_side=%q: status = %d, want 400", side, w.Code)
+		}
+		if got := loadConfig().PauseSide; got != pauseSideDire {
+			t.Errorf("pause_side=%q: a refused POST changed the config to %q", side, got)
+		}
+	}
+}
+
+func TestSettingsPost_treatsABlankPauseSideAsAbsent(t *testing.T) {
+	// Whitespace is not an unknown side, it is a field that was not filled in —
+	// the same reading addr, dashboard_url and both durations already get here.
+	withTempConfig(t)
+	form := beaconLightForm()
+	form.Set("pause_side", "   ")
+
+	if w := submitSettings(t, &settingsHandler{}, form); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if got := loadConfig().PauseSide; got != pauseSideBoth {
+		t.Errorf("PauseSide = %q, want the default %q", got, pauseSideBoth)
+	}
+}
+
+func TestSettingsPost_acceptsTheEndsOfTheRange(t *testing.T) {
+	withTempConfig(t)
+	form := beaconLightForm()
+	form.Set("flash_seconds", "1")
+	form.Set("lobby_flash_seconds", "600")
+
+	if w := submitSettings(t, &settingsHandler{}, form); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if got := loadConfig(); got.FlashSeconds != 1 || got.LobbyFlashSeconds != 600 {
+		t.Errorf("durations = %d/%d, want 1/600", got.FlashSeconds, got.LobbyFlashSeconds)
+	}
+}
+
+func TestSettingsPost_aFormWithoutTheNewFieldsSavesTheDefaults(t *testing.T) {
+	// A form from before v0.6.0 — a stale tab, a bookmarked POST. Absent is not
+	// a refusable mistake, it is a form that predates the field, and the same
+	// place addr, port and line_number already land is the documented default.
+	withTempConfig(t)
+
+	w := submitSettings(t, &settingsHandler{}, url.Values{
+		"addr": {defaultAddr}, "port": {"1337"},
+		"dashboard_url": {""}, "line_number": {"1"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	got := loadConfig()
+	if got.FlashSeconds != defaultFlashSeconds || got.LobbyFlashSeconds != defaultLobbyFlashSeconds {
+		t.Errorf("durations = %d/%d, want the defaults", got.FlashSeconds, got.LobbyFlashSeconds)
+	}
+	if got.PauseSide != pauseSideBoth || got.LobbyFlash {
+		t.Errorf("PauseSide = %q, LobbyFlash = %v, want %q and off", got.PauseSide, got.LobbyFlash, pauseSideBoth)
+	}
+}
+
+func TestSettingsPost_stillNeverEchoesTheToken(t *testing.T) {
+	// The B1 rule, re-checked because this change adds fields to the same form
+	// and the same POST: a beacon-light save must not disturb the credential.
+	withTempConfig(t)
+	const secret = "sk-live-do-not-leak-me"
+	cfg := defaultConfig()
+	cfg.DashboardURL = "http://127.0.0.1:1"
+	cfg.APIToken = secret
+	saveConfig(cfg)
+
+	form := beaconLightForm()
+	form.Set("dashboard_url", "http://127.0.0.1:1")
+	form.Set("flash_seconds", "30")
+	w := submitSettings(t, &settingsHandler{}, form)
+
+	if strings.Contains(w.Body.String(), secret) {
+		t.Errorf("the saved page rendered the token:\n%s", w.Body.String())
+	}
+	if got := loadConfig(); got.APIToken != secret {
+		t.Errorf("APIToken = %q — saving the light settings disturbed the credential", got.APIToken)
+	}
+	if got := loadConfig().FlashSeconds; got != 30 {
+		t.Errorf("FlashSeconds = %d, want 30", got)
 	}
 }

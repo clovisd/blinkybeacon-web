@@ -62,6 +62,8 @@ button:hover{background:#106ebe}
   <input id="token" name="token" type="password" value="" autocomplete="off" spellcheck="false" placeholder="%s">
   <div class="hint">%s</div>
 </div>
+<h2>Beacon Light</h2>
+%s
 <button type="submit">Save &amp; Apply</button>
 </form>
 </body>
@@ -142,7 +144,8 @@ func (h *settingsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 		h.csrf(),
 		html.EscapeString(cfg.Addr), cfg.Port,
 		html.EscapeString(cfg.DashboardURL), h.lineField(cfg),
-		html.EscapeString(placeholder), hint)
+		html.EscapeString(placeholder), hint,
+		beaconLightFields(cfg))
 }
 
 // tokenFieldText is what the token field says about the stored token without
@@ -194,6 +197,37 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		line = defaultLineNumber
 	}
 
+	// The three beacon-light settings. Unlike addr, port and line_number above,
+	// a value that IS there and is wrong is refused rather than quietly
+	// replaced with the default: the operator is watching this page, and
+	// telling them their 900 became 15 is the difference between a setting and
+	// a suggestion. An ABSENT field is not a mistake — it is a form that
+	// predates v0.6.0 — and lands on the documented default like everything
+	// else here.
+	flashSeconds, err := formSeconds(r.FormValue("flash_seconds"), "flash_seconds", defaultFlashSeconds)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	lobbyFlashSeconds, err := formSeconds(r.FormValue("lobby_flash_seconds"), "lobby_flash_seconds", defaultLobbyFlashSeconds)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// A browser sends nothing at all for an unticked checkbox, so absent is the
+	// only way "off" is ever expressed.
+	lobbyFlash := r.FormValue("lobby_flash") != ""
+
+	pauseSide := strings.TrimSpace(r.FormValue("pause_side"))
+	if pauseSide == "" {
+		pauseSide = defaultPauseSide
+	}
+	if !validPauseSide(pauseSide) {
+		http.Error(w, fmt.Sprintf("pause_side must be %q, %q or %q",
+			pauseSideBoth, pauseSideRadiant, pauseSideDire), http.StatusBadRequest)
+		return
+	}
+
 	// The token field renders empty every time, because it is never echoed
 	// back. So a blank submit means "leave it alone" — otherwise changing the
 	// port would silently unbind the watcher. Clearing it is a deliberate act.
@@ -215,7 +249,13 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		token = saved.APIToken
 	}
 
-	newCfg := Config{Addr: addr, Port: port, DashboardURL: dashboardURL, LineNumber: line, APIToken: token}
+	newCfg := Config{
+		Addr: addr, Port: port, DashboardURL: dashboardURL, LineNumber: line, APIToken: token,
+		FlashSeconds:      flashSeconds,
+		LobbyFlash:        lobbyFlash,
+		LobbyFlashSeconds: lobbyFlashSeconds,
+		PauseSide:         pauseSide,
+	}
 	if err := saveConfig(newCfg); err != nil {
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -235,6 +275,86 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	if h.onSave != nil {
 		go h.onSave(newCfg)
 	}
+}
+
+// beaconLightFields renders the three v0.6.0 controls: how long the draft-end
+// flash runs, whether and how long a new lobby flashes, and whose pauses spin
+// the light.
+//
+// Every value here is an int or one of three fixed words by the time it lands —
+// loadConfig has already defaulted anything else away — so unlike the fields
+// above there is no operator string to escape. The moment that stops being true
+// this needs html.EscapeString like everything else on the page.
+func beaconLightFields(cfg Config) string {
+	return fmt.Sprintf(`<div class="field">
+  <label for="flash_seconds">Draft-End Flash</label>
+  <input id="flash_seconds" name="flash_seconds" type="number" value="%d" min="%d" max="%d">
+  <div class="hint">Seconds the beacon flashes when the draft ends. %d&ndash;%d.</div>
+</div>
+<div class="field">
+  <label for="lobby_flash_seconds">New-Lobby Flash</label>
+  <label class="clear"><input id="lobby_flash" name="lobby_flash" type="checkbox" value="1"%s> Flash when a new lobby is detected</label>
+  <input id="lobby_flash_seconds" name="lobby_flash_seconds" type="number" value="%d" min="%d" max="%d">
+  <div class="hint">Seconds to flash when a fresh match appears on the line while the game is still before or in the draft. %d&ndash;%d.</div>
+</div>
+<div class="field">
+  <label for="pause_side">Spin For Pauses From</label>
+  <select id="pause_side" name="pause_side">
+%s  </select>
+  <div class="hint">Picking a side needs a dashboard that publishes <code>pause_party</code> (<strong>v3.101.0</strong> or newer). On an older one, Radiant and Dire never spin for a pause at all.</div>
+</div>`,
+		cfg.FlashSeconds, minFlashSeconds, maxFlashSeconds, minFlashSeconds, maxFlashSeconds,
+		checkedAttr(cfg.LobbyFlash),
+		cfg.LobbyFlashSeconds, minFlashSeconds, maxFlashSeconds, minFlashSeconds, maxFlashSeconds,
+		pauseSideOptions(cfg.PauseSide))
+}
+
+// checkedAttr is the checkbox's state, as the attribute HTML spells it.
+func checkedAttr(on bool) string {
+	if on {
+		return " checked"
+	}
+	return ""
+}
+
+// pauseSideOptions renders the three sides with the saved one selected. The
+// words are this function's, not the config's — the value attribute is what
+// round-trips, and it is one of three constants.
+func pauseSideOptions(saved string) string {
+	sides := []struct{ value, label string }{
+		{pauseSideBoth, "Both sides &mdash; every pause"},
+		{pauseSideRadiant, "Radiant only"},
+		{pauseSideDire, "Dire only"},
+	}
+	var b strings.Builder
+	for _, s := range sides {
+		selected := ""
+		if s.value == saved {
+			selected = " selected"
+		}
+		fmt.Fprintf(&b, "    <option value=\"%s\"%s>%s</option>\n", s.value, selected, s.label)
+	}
+	return b.String()
+}
+
+// formSeconds reads one flash duration off the form.
+//
+// Blank or absent means "the default": the form always renders both of these
+// with a value, so a submit without one is not the operator's browser doing
+// normal work — it is something older, and the documented default is the
+// predictable place for it to land. Anything else out of range is refused, by
+// name, so the page can say which field it was.
+func formSeconds(raw, field string, def int) (int, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || !validFlashSeconds(n) {
+		return 0, fmt.Errorf("%s must be a whole number of seconds between %d and %d, got %q",
+			field, minFlashSeconds, maxFlashSeconds, v)
+	}
+	return n, nil
 }
 
 // linesFetchTimeout bounds the settings page's look-up of the dashboard's line

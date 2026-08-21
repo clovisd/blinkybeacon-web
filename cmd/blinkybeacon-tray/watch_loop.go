@@ -17,8 +17,12 @@ const pollTimeout = 1500 * time.Millisecond
 // The config is re-read every tick, so saving new settings retargets the
 // watcher — new URL, new line, new token — without restarting the app.
 func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg func() Config, interval time.Duration) {
-	w := NewWatcher()
+	w := NewWatcher(watcherSettings(cfg()))
 	lastTarget := ""
+	// The beacon settings the live watcher was built with. Saving new ones has
+	// to reach a watcher that was built before they existed, and the honest way
+	// to do that is to build a new one — the same thing a retarget does.
+	lastSettings := w.set
 
 	for {
 		c := cfg()
@@ -56,12 +60,23 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 			}
 			status = unbound
 		} else {
-			if target != lastTarget {
+			set := watcherSettings(c)
+			switch {
+			case target != lastTarget:
 				// Retargeted. Whatever the previous line was doing is not ours
 				// any more — start from no assumptions.
-				w = NewWatcher()
-				lastTarget = target
+				w = NewWatcher(set)
+				lastTarget, lastSettings = target, set
 				log.Printf("Watching %s", target)
+			case set != lastSettings:
+				// The operator saved new beacon settings. Rebuilt rather than
+				// patched, because half this watcher's state is about how long
+				// a flash that is ALREADY RUNNING has left — and that answer
+				// belongs to the settings it was armed under.
+				w = NewWatcher(set)
+				lastSettings = set
+				log.Printf("Beacon settings changed: flash %v, lobby flash %v, pauses %s",
+					set.FlashDuration, set.LobbyFlash, set.PauseSide)
 			}
 
 			pollCtx, cancel := context.WithTimeout(ctx, pollTimeout)

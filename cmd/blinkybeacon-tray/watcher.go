@@ -23,17 +23,28 @@ import (
 // whose cfg predates draft_complete, which is what this restores.
 const gameStateHeroSelection = "DOTA_GAMERULES_STATE_HERO_SELECTION"
 
+// preGameStates are the game_state values that mean "this match has not
+// started yet": the ones a line is in between the lobby being made and the
+// horn. Named individually rather than as "anything before PRE_GAME" because
+// the dashboard's list is a set of strings off Dota's wire, not an ordering —
+// see the state table in the dashboard's GSI_DATA.md, which is where these four
+// were read from.
+//
+// They are what makes the new-lobby flash a LOBBY flash: a match id appearing
+// while the game is already live is a tray that started late, not a lobby.
+var preGameStates = map[string]bool{
+	"DOTA_GAMERULES_STATE_INIT":                     true,
+	"DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD": true,
+	"DOTA_GAMERULES_STATE_WAIT_FOR_MAP_TO_LOAD":     true,
+	gameStateHeroSelection:                          true,
+}
+
 // The two end-of-draft triggers, by name. Only ever used to stamp which one
 // spent a match's single flash — never compared against dashboard data.
 const (
 	triggerPicks     = "picks"
 	triggerGameState = "game state"
 )
-
-// flashDuration is the one timed element in this watcher. Everything else is a
-// function of the latest poll. Fifteen seconds, per the owner: long enough that
-// a desk looking away at the last pick still catches it.
-const flashDuration = 15 * time.Second
 
 // feedLostAfterSeconds is how quiet seconds_since_gsi may get before we stop
 // believing the payload. Deliberately well above the ~10s heartbeat Dota sends
@@ -72,6 +83,13 @@ type LineState struct {
 	SecondsSinceGSI *float64 `json:"seconds_since_gsi"`
 	TS              int64    `json:"ts"`
 	DraftComplete   *bool    `json:"draft_complete"`
+	// PauseParty is who the CURRENT pause is attributed to: "radiant", "dire",
+	// "admin", "unassigned" — or null, which the contract reserves for "not
+	// paused". A *string for the same reason draft_complete is a *bool: an
+	// older dashboard sends no such key at all, and absent must decode to the
+	// same nothing as an explicit null rather than to the empty string, which
+	// would be an attribution nobody made.
+	PauseParty *string `json:"pause_party"`
 }
 
 // WatchStatus is what the tray says about the dashboard feed.
@@ -222,21 +240,71 @@ func fetchLineState(ctx context.Context, client *http.Client, dashboardURL strin
 // LEVEL-DRIVEN: every decision is taken from the CURRENT poll. The only memory
 // it keeps is the previous poll's draft_complete and game_state (and the match
 // they belonged to, so neither edge can cross a match boundary), which match
-// has already spent its flash, plus the deadline of the 15-second flash itself.
+// has already spent each of its two flashes, plus the deadline of the flash
+// itself — whose length is now the operator's, not this file's.
 // A missed poll, a duplicate poll or a restart mid-pause all converge on the
 // right light.
 type Watcher struct {
+	set WatcherSettings
+
 	prevMatchID       string
 	prevDraftComplete *bool
 	prevGameState     string
-	// flashedForMatch is the once-per-match guard: non-empty once a match has
-	// had its flash, and the stamp says which match and which trigger spent it.
-	// Cleared only by a genuinely new match_id, or by going blind.
+	// flashedForMatch is the once-per-match guard for the DRAFT-END flash:
+	// non-empty once a match has had it, and the stamp says which match and
+	// which trigger spent it. Cleared only by a genuinely new match_id, or by
+	// going blind.
 	flashedForMatch string
-	flashUntil      time.Time
+	// lobbyFlashedForMatch is the same guard for the NEW-LOBBY flash, and it is
+	// deliberately its own field. The two flashes announce different moments of
+	// the same match, so a match that starts with a lobby flash must still have
+	// its draft-end flash to spend; sharing one guard would silently trade the
+	// second away for the first.
+	lobbyFlashedForMatch string
+	// flashUntil is the deadline of whatever flash is running. ONE deadline for
+	// both kinds, because there is only one light: when both are live at once
+	// it runs to the later of the two rather than being cut short by the first.
+	flashUntil time.Time
 }
 
-func NewWatcher() *Watcher { return &Watcher{} }
+// WatcherSettings is the operator's half of the watcher's behaviour — the three
+// v0.6.0 settings out of Config, resolved to the types the state machine
+// compares against. Passed in whole rather than read from the config file here,
+// so a watcher's behaviour is fixed at the moment it is built and cannot change
+// under it between two polls of the same match.
+type WatcherSettings struct {
+	FlashDuration      time.Duration
+	LobbyFlash         bool
+	LobbyFlashDuration time.Duration
+	PauseSide          string
+}
+
+// watcherSettings reads the three settings out of a Config.
+//
+// It re-applies the same defaults loadConfig does, because a Config does not
+// only arrive from the config file: main.go's flags build one, and so does
+// every test. A zero FlashSeconds would otherwise mean a flash whose deadline
+// has passed before it is set, which is a light that never comes on.
+func watcherSettings(cfg Config) WatcherSettings {
+	s := WatcherSettings{
+		FlashDuration:      time.Duration(cfg.FlashSeconds) * time.Second,
+		LobbyFlash:         cfg.LobbyFlash,
+		LobbyFlashDuration: time.Duration(cfg.LobbyFlashSeconds) * time.Second,
+		PauseSide:          cfg.PauseSide,
+	}
+	if !validFlashSeconds(cfg.FlashSeconds) {
+		s.FlashDuration = defaultFlashSeconds * time.Second
+	}
+	if !validFlashSeconds(cfg.LobbyFlashSeconds) {
+		s.LobbyFlashDuration = defaultLobbyFlashSeconds * time.Second
+	}
+	if !validPauseSide(cfg.PauseSide) {
+		s.PauseSide = defaultPauseSide
+	}
+	return s
+}
+
+func NewWatcher(s WatcherSettings) *Watcher { return &Watcher{set: s} }
 
 // Decide returns the beacon mode and the feed status for one poll.
 // A nil LineState means the poll itself failed.
@@ -261,13 +329,21 @@ func (w *Watcher) Decide(now time.Time, ls *LineState) (StateValue, WatchStatus)
 		}
 	}
 
+	// Read before forgetIfNewMatch moves it on: the new-lobby trigger IS the
+	// edge in match_id, and the edge is gone the instant prevMatchID is updated.
+	prevMatchID := w.prevMatchID
 	w.forgetIfNewMatch(ls)
+
+	if w.isNewLobby(prevMatchID, ls) {
+		w.armFlash(now, w.set.LobbyFlashDuration)
+		w.lobbyFlashedForMatch = *ls.MatchID
+	}
 	// Whichever comes first, once per match. The guard is checked before the
 	// triggers are even consulted, so the second signal of a match is not just
 	// ignored — it never gets to restamp anything either.
 	if w.flashedForMatch == "" {
 		if trigger := w.draftEndTrigger(ls); trigger != "" {
-			w.flashUntil = now.Add(flashDuration)
+			w.armFlash(now, w.set.FlashDuration)
 			w.flashedForMatch = matchStamp(ls, trigger)
 		}
 	}
@@ -279,14 +355,68 @@ func (w *Watcher) Decide(now time.Time, ls *LineState) (StateValue, WatchStatus)
 	w.prevGameState = ls.GameState
 
 	switch {
-	case ls.Paused:
-		// A pause outranks the flash: it is the longer-lived truth.
+	case ls.Paused && w.pauseCounts(ls):
+		// A pause outranks the flash: it is the longer-lived truth. A pause the
+		// side filter excluded is not one of ours at all, so it falls through
+		// and the light carries on with whatever it was doing.
 		return StateSpin, WatchOK
 	case !now.After(w.flashUntil):
 		return StateFlash, WatchOK
 	default:
 		return StateIdle, WatchOK
 	}
+}
+
+// isNewLobby reports whether this poll is the first sight of a match that has
+// not started yet — the moment a lobby appears on the line.
+//
+// Two conditions, and both are load-bearing. A match id we have not seen before
+// is what makes it NEW; a pre-game state is what makes it a LOBBY. Without the
+// second, every tray restart mid-game would announce a lobby that opened an
+// hour ago, which is the same confident wrong light the draft flash refuses to
+// show after a feed gap.
+//
+// A null match_id is not a lobby either: the projection publishes null until
+// Dota has named the match, and "the line has no match on it" is the state this
+// trigger is waiting to see END.
+func (w *Watcher) isNewLobby(prevMatchID string, ls *LineState) bool {
+	if !w.set.LobbyFlash {
+		return false
+	}
+	if ls.MatchID == nil || *ls.MatchID == "" {
+		return false
+	}
+	if *ls.MatchID == prevMatchID || *ls.MatchID == w.lobbyFlashedForMatch {
+		return false
+	}
+	return preGameStates[ls.GameState]
+}
+
+// armFlash puts the flash out d from now — or leaves it alone, if it is already
+// set to run longer. The two flash kinds share this one deadline because they
+// share one beacon: a two-second draft flash landing inside a thirty-second
+// lobby flash must not turn the light off twenty-eight seconds early.
+func (w *Watcher) armFlash(now time.Time, d time.Duration) {
+	if until := now.Add(d); until.After(w.flashUntil) {
+		w.flashUntil = until
+	}
+}
+
+// pauseCounts reports whether this pause is one the operator asked the light to
+// spin for.
+//
+// "both" is the default and filters nothing, which is v0.5.0 exactly. A side
+// filter compares against pause_party, and everything that is not that side —
+// the other team, an admin pause, an "unassigned" the dashboard could not
+// attribute, and the null an older dashboard leaves the field at — is not it.
+// That last case is why the settings page says out loud that the filter needs a
+// dashboard publishing pause_party: on an older one, radiant and dire spin for
+// nothing at all.
+func (w *Watcher) pauseCounts(ls *LineState) bool {
+	if w.set.PauseSide == pauseSideBoth {
+		return true
+	}
+	return ls.PauseParty != nil && *ls.PauseParty == w.set.PauseSide
 }
 
 // draftEndTrigger reports which end-of-draft signal this poll carries, or ""
@@ -365,6 +495,7 @@ func (w *Watcher) forgetIfNewMatch(ls *LineState) {
 		w.prevDraftComplete = nil
 		w.prevGameState = ""
 		w.flashedForMatch = ""
+		w.lobbyFlashedForMatch = ""
 	}
 	w.prevMatchID = *ls.MatchID
 }
@@ -391,6 +522,7 @@ func (w *Watcher) forget() {
 	// beacon for good. Safe, because neither trigger can fire again without a
 	// fresh edge, and both edges have just been forgotten too.
 	w.flashedForMatch = ""
+	w.lobbyFlashedForMatch = ""
 	w.flashUntil = time.Time{}
 }
 

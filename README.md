@@ -27,6 +27,15 @@ A Windows system tray app that:
   running v3.99.0 or later makes it land at the last pick itself — optional, not
   required. Needs a dashboard API token; see
   [BEACON-DASHBOARD.md](BEACON-DASHBOARD.md)
+- **Three settings for the light** (v0.6.0), under **Beacon Light** on the
+  settings page: **how long the draft-end flash runs** (`flash_seconds`,
+  default 15); **a second flash when a new lobby is detected** and its length
+  (`lobby_flash`, default off / `lobby_flash_seconds`, default 10) — "new
+  lobby" meaning the tray sees a fresh match id while the game is still before
+  or in the draft, once per match; and **which side's pauses spin the light**
+  (`pause_side`, default `both`). The defaults reproduce v0.5.0 exactly, so an
+  upgrade changes nothing until you ask it to. The side filter needs a
+  dashboard that publishes `pause_party` — **v3.101.0 or newer**
 
 ### Download
 
