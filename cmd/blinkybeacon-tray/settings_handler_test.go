@@ -147,3 +147,52 @@ func TestSettingsPost_refusesAGuessedCSRFToken(t *testing.T) {
 		t.Errorf("Addr = %q — a guessed token was accepted", got.Addr)
 	}
 }
+
+// ------------------------------------------------ the HTTP API, documented
+
+func TestSettingsForm_documentsTheHTTPAPI(t *testing.T) {
+	// The settings page is the one place an operator already looks, so it is
+	// where the control API is written down — every route, its method, and
+	// what /status answers. The Companion module and any script drive these.
+	withTempConfig(t)
+	saveConfig(Config{Addr: "192.168.1.20", Port: 4242})
+
+	h := &settingsHandler{}
+	w := httptest.NewRecorder()
+	h.handleGet(w, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	body := w.Body.String()
+
+	for _, want := range []string{
+		"HTTP API",
+		"http://192.168.1.20:4242",         // the live base URL, not a placeholder
+		"POST", "/spin", "/flash", "/stop", // the control routes
+		"GET", "/status", // the state route
+		`"state"`, `"connected"`, // the /status JSON shape
+		"idle", "spin", "flash", // the state vocabulary
+		"503",  // what a missing beacon answers
+		"curl", // a copy-pasteable example
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("settings page does not document %q", want)
+		}
+	}
+}
+
+func TestSettingsForm_apiDocsFollowTheSavedBindAddress(t *testing.T) {
+	// 0.0.0.0 is what you bind, not what you call; the example must name an
+	// address a client can actually reach.
+	withTempConfig(t)
+	saveConfig(Config{Addr: "0.0.0.0", Port: 1337})
+
+	h := &settingsHandler{}
+	w := httptest.NewRecorder()
+	h.handleGet(w, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	body := w.Body.String()
+
+	if strings.Contains(body, "http://0.0.0.0:1337") {
+		t.Errorf("API examples point at 0.0.0.0, which no client can call")
+	}
+	if !strings.Contains(body, "http://127.0.0.1:1337") {
+		t.Errorf("API examples should fall back to 127.0.0.1 when bound to all interfaces:\n%s", body)
+	}
+}
