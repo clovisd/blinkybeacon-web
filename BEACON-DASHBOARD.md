@@ -6,6 +6,12 @@ The tray app can watch a LIVE Dashboard line and drive the beacon by itself:
 - **The game is paused → the beacon spins amber, for as long as the pause lasts.**
 - **Anything else → the beacon is dark.**
 
+Since **v0.6.0** all three of those are yours to change: how long the draft
+flash runs, whether a **new lobby** flashes too and for how long, and whether a
+pause spins the light for **both sides or only one**. See
+[section 4](#4-tuning-the-light). The defaults are exactly the behaviour above,
+so upgrading and never opening Settings changes nothing.
+
 **"The draft ends" is read off the dashboard, whichever way it can see it —
 and no cfg needs reinstalling for that to work.**
 
@@ -138,12 +144,48 @@ Some things worth knowing about the token:
 - **Revoking it on the dashboard is instant.** The beacon goes dark on the very
   next poll, within about 2 seconds.
 
-## 4. What each light means
+## 4. Tuning the light
+
+Right-click the tray icon → **Settings…** → **Beacon Light**. Three controls,
+all optional; **Save & Apply** and the watcher picks them up on its next poll.
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Draft-End Flash** | `15` seconds | How long the beacon flashes when the draft ends. 1–600. |
+| **New-Lobby Flash** | off, `10` seconds | Flash again, separately, when a **new lobby** appears on the line. 1–600. |
+| **Spin For Pauses From** | Both sides | Whether a pause spins the light for everyone, or only for **Radiant** or only for **Dire**. |
+
+**What "a new lobby" means.** The tray sees a **fresh match id** on the line
+while the game is still **before or in the draft** — Dota's `INIT`,
+`WAIT_FOR_PLAYERS_TO_LOAD`, `WAIT_FOR_MAP_TO_LOAD` or `HERO_SELECTION`. That is
+the moment a game has been made and the players are filing in. It fires **once
+per match**; the next match arms it again.
+
+It deliberately does **not** fire when the tray joins a game already in
+progress — starting the app, or rebinding it to another line, mid-match is not
+a lobby opening, and announcing one would be a light for a moment that passed
+before anyone was watching.
+
+A lobby flash and a draft-end flash in the same match are **both allowed** —
+they are separate announcements of separate moments. If they ever overlap, the
+beacon simply flashes until the later of the two finishes.
+
+> **The side filter needs a dashboard that can attribute a pause.** Picking
+> Radiant or Dire compares against the dashboard's `pause_party`, published
+> from **v3.101.0** onwards. On an older dashboard nothing is attributed, so
+> **Radiant and Dire never spin for a pause at all** — leave it on *Both sides*
+> until the dashboard is upgraded. The settings page says so on the control.
+>
+> Even on a new enough dashboard, an **admin pause** and one the dashboard
+> could not attribute count as neither side: they spin only under *Both sides*.
+
+## 5. What each light means
 
 | Beacon | Means |
 |---|---|
-| **Flashing red, ~15 seconds** | The pick/ban phase just ended — the draft is done. |
-| **Spinning amber** | The game is paused, right now. It stops when play resumes. |
+| **Flashing red** | The pick/ban phase just ended — the draft is done. 15 seconds unless you changed it. |
+| **Flashing red, at the top of a game** | A new lobby appeared on the line — only if you turned that on; see [section 4](#4-tuning-the-light). |
+| **Spinning amber** | The game is paused, right now. It stops when play resumes. If you picked a side, only that side's pauses. |
 | **Dark** | Nothing is happening — **or** the dashboard feed is gone. Check the tray. |
 
 Dark is deliberately ambiguous at the beacon, so the tray menu always spells
@@ -165,7 +207,7 @@ And below it, what the feed is doing on that line:
 | `○ Dashboard: not configured` | No dashboard URL set. The watcher is off. |
 | `○ Dashboard: no token set` | URL set, but no API token. **Nothing is being polled at all** — see [section 3](#3-get-a-token-and-paste-it-in). |
 | `● Dashboard: watching · draft timing: picks` | Polling fine, feed is fresh. This line publishes draft detail, so the flash lands at the **last final pick**. Trust the light. |
-| `● Dashboard: watching · draft timing: game state` | Polling fine, feed is fresh. This line publishes no draft detail, so the flash lands when the game state **leaves hero selection**. **Nothing is wrong and nothing needs reinstalling** — see [section 5](#5-if-it-isnt-working). |
+| `● Dashboard: watching · draft timing: game state` | Polling fine, feed is fresh. This line publishes no draft detail, so the flash lands when the game state **leaves hero selection**. **Nothing is wrong and nothing needs reinstalling** — see [section 6](#6-if-it-isnt-working). |
 | `▲ Dashboard: token rejected` | The dashboard refused the token: it was revoked, expired, or mistyped. Mint a new one and paste it in. |
 | `▲ Dashboard: line 2 not found` | Token accepted, but that line number doesn't exist (or isn't an official line). Reopen Settings and pick the line from the list. |
 | `○ Dashboard: idle — no game data yet` | Dashboard reached and the line is running, but it has never heard from Dota since it started. **Nothing is wrong** — there is just no game on this line yet. |
@@ -187,7 +229,7 @@ The rule the watcher follows: **never a confident wrong light.** If it cannot
 see the game, it goes dark rather than leaving the beacon spinning on a pause
 that may have ended minutes ago.
 
-## 5. If it isn't working
+## 6. If it isn't working
 
 **`▲ token rejected`**
 
@@ -260,20 +302,27 @@ the fact is worse than no flash. The pause light, by contrast, always
 self-corrects — it reflects the current state on every poll, so restarting the
 app mid-pause immediately spins.
 
-## 6. Details worth knowing
+## 7. Details worth knowing
 
 - **Polls every 2 seconds**, so the light can lag reality by up to ~2 seconds.
 - **The feed counts as quiet** if the dashboard hasn't heard from Dota for more
   than 30 seconds. During a legitimate pause Dota still checks in about every 10
   seconds, so a real pause is never mistaken for a dead feed.
-- **A pause outranks the flash.** If a pause begins during the 15-second flash,
-  the beacon switches straight to spinning, and does not go back to flashing
-  when the pause lifts.
+- **A pause outranks the flash.** If a pause begins during a flash — either
+  kind — the beacon switches straight to spinning, and does not go back to
+  flashing when the pause lifts. A pause your **side filter excludes** is not a
+  pause as far as the light is concerned, so it outranks nothing.
 - **The draft flash fires once per match, whichever trigger comes first.** The
   last pick and the end of hero selection are two views of the same moment; the
   first one seen spends the match's flash and the second is ignored. "All picks
   in" also stays true for the rest of the game, so later polls don't re-flash.
   A new match starts the detector over.
+- **The two flashes have separate once-per-match guards.** A match can have its
+  lobby flash and its draft-end flash; it cannot have two of either.
+- **Losing the feed forgets both.** If the dashboard goes away and comes back,
+  the watcher re-syncs from what it can see — which means a lobby it already
+  announced can be announced once more. That is the same "never a confident
+  wrong light" trade the draft flash has always made.
 - **A null game state is never treated as the draft ending.** If the dashboard
   briefly can't see Dota's state, the watcher does not flash on the way into or
   out of that gap — same rule as a dropped feed.
@@ -295,9 +344,20 @@ app mid-pause immediately spins.
     "port": 1337,
     "dashboard_url": "https://dashboard.example.com",
     "line_number": 2,
-    "token": "the-token-you-were-given"
+    "token": "the-token-you-were-given",
+    "flash_seconds": 15,
+    "lobby_flash": false,
+    "lobby_flash_seconds": 10,
+    "pause_side": "both"
   }
   ```
+
+  The last four are the [section 4](#4-tuning-the-light) settings.
+  `pause_side` is `both`, `radiant` or `dire`; both durations are 1–600
+  seconds. **A missing key, or one out of range, loads as its default** rather
+  than stopping the app — so a file written by v0.5.0 keeps working untouched.
+  (The settings page is stricter: type 900 there and it says no, instead of
+  quietly saving 15.)
 
   You can edit it by hand while the app is closed if you prefer. **This file
   holds the token in plain text** — see [section 3](#3-get-a-token-and-paste-it-in).
@@ -312,8 +372,9 @@ app mid-pause immediately spins.
   dashboard, every time. Unbind it (blank the URL, or forget the token) and it
   hands the beacon back dark, once, and then leaves it to you.
 
-## 7. What this version does not do
+## 8. What this version does not do
 
-- No pick-the-line-from-a-list — you type the number.
 - No sound, no notification, no history. One light, three states.
 - Only one line at a time.
+- The side filter is Radiant or Dire, not a team name — the beacon knows which
+  side of the map paused, not who is sitting on it.
