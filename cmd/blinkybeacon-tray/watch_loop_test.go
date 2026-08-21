@@ -222,28 +222,27 @@ func TestWatchLoop_flashesWhenTheLastPickLands(t *testing.T) {
 	})
 }
 
-func TestWatchLoop_doesNotFlashWhenHeroSelectionMerelyEnds(t *testing.T) {
-	// The whole point of the owner's ruling, end to end: a dashboard that has
-	// not shipped draft_complete gives the tray nothing to flash on, and the
-	// old game_state trigger must not fire in its place.
+func TestWatchLoop_flashesWhenHeroSelectionEndsOnAnUnreinstalledCfg(t *testing.T) {
+	// The fallback, end to end: a dashboard that sends no draft_complete at all
+	// — the cfg every existing install already has — still drives the beacon at
+	// the end of the pick/ban phase, off the game state alone.
 	stub := newStubDashboard(draftPayload)
 	srv := httptest.NewServer(stub)
 	defer srv.Close()
 
 	app := NewAppState()
-	b := &countingBeacon{}
-	app.SetBeacon(b)
+	app.SetBeacon(&countingBeacon{})
 
 	cfg := Config{DashboardURL: srv.URL, LineNumber: 1, APIToken: testToken}
 	startWatchLoop(t, app, srv.Client(), func() Config { return cfg }, 5*time.Millisecond)
 
 	waitFor(t, "the first poll", func() bool { return stub.pollCount() > 0 })
 	stub.set(livePayload) // hero selection ends
-	waitFor(t, "several more polls", func() bool { return stub.pollCount() > 5 })
 
-	if b.flashes != 0 {
-		t.Errorf("Flash called %d times, want 0 — leaving hero selection is not the draft ending", b.flashes)
-	}
+	waitFor(t, "the beacon to flash at the end of the pick/ban phase", func() bool {
+		state, _, _ := app.Get()
+		return state == StateFlash
+	})
 }
 
 func TestWatchLoop_tellsTheTrayWhenNoDraftDataIsComing(t *testing.T) {

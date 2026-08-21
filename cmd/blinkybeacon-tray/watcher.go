@@ -10,15 +10,25 @@ import (
 	"time"
 )
 
-// gameStateHeroSelection is the dashboard's own constant for the draft. It is
-// deliberately NOT what arms the flash, and must not be wired back up as one:
-// the owner's ruling of 2026-08-20 is that "'Draft ended' means when all picks
-// and bans have completed, not when players have picked their assigned hero
-// from the drafted bunch". In Captains Mode this state outlasts the pick/ban
-// phase by the whole choose-your-hero stretch, so leaving it fires minutes
-// late. draft_complete is the signal; this constant is kept for the record and
-// because game_state is still decoded.
+// gameStateHeroSelection is the dashboard's own constant for the draft.
+// Leaving it is the FALLBACK end-of-draft signal: the same transition the
+// dashboard's action log has always recorded as "Draft → Strategy", derivable
+// from the eight fields every install's cfg already sends.
+//
+// It is the coarser of the two triggers — in Captains Mode this state outlasts
+// the pick/ban phase by the choose-your-hero stretch, so it can land a little
+// after the last final pick the owner's ruling of 2026-08-20 named. That is why
+// draft_complete, where a line sends it, wins: see draftEndTrigger. But a flash
+// slightly late beats the v0.3.0 behaviour of no flash at all on every install
+// whose cfg predates draft_complete, which is what this restores.
 const gameStateHeroSelection = "DOTA_GAMERULES_STATE_HERO_SELECTION"
+
+// The two end-of-draft triggers, by name. Only ever used to stamp which one
+// spent a match's single flash — never compared against dashboard data.
+const (
+	triggerPicks     = "picks"
+	triggerGameState = "game state"
+)
 
 // flashDuration is the one timed element in this watcher. Everything else is a
 // function of the latest poll. Fifteen seconds, per the owner: long enough that
@@ -210,14 +220,20 @@ func fetchLineState(ctx context.Context, client *http.Client, dashboardURL strin
 // Watcher turns a stream of polls into a beacon mode.
 //
 // LEVEL-DRIVEN: every decision is taken from the CURRENT poll. The only memory
-// it keeps is the previous draft_complete (and the match it belonged to, so the
-// edge cannot cross a match boundary) plus the deadline of the 15-second flash.
+// it keeps is the previous poll's draft_complete and game_state (and the match
+// they belonged to, so neither edge can cross a match boundary), which match
+// has already spent its flash, plus the deadline of the 15-second flash itself.
 // A missed poll, a duplicate poll or a restart mid-pause all converge on the
 // right light.
 type Watcher struct {
 	prevMatchID       string
 	prevDraftComplete *bool
-	flashUntil        time.Time
+	prevGameState     string
+	// flashedForMatch is the once-per-match guard: non-empty once a match has
+	// had its flash, and the stamp says which match and which trigger spent it.
+	// Cleared only by a genuinely new match_id, or by going blind.
+	flashedForMatch string
+	flashUntil      time.Time
 }
 
 func NewWatcher() *Watcher { return &Watcher{} }
@@ -246,10 +262,21 @@ func (w *Watcher) Decide(now time.Time, ls *LineState) (StateValue, WatchStatus)
 	}
 
 	w.forgetIfNewMatch(ls)
-	if w.draftJustCompleted(ls) {
-		w.flashUntil = now.Add(flashDuration)
+	// Whichever comes first, once per match. The guard is checked before the
+	// triggers are even consulted, so the second signal of a match is not just
+	// ignored — it never gets to restamp anything either.
+	if w.flashedForMatch == "" {
+		if trigger := w.draftEndTrigger(ls); trigger != "" {
+			w.flashUntil = now.Add(flashDuration)
+			w.flashedForMatch = matchStamp(ls, trigger)
+		}
 	}
 	w.rememberDraft(ls)
+	// Stored verbatim, "" included. A null game_state means the dashboard
+	// cannot see Dota's state at all; remembering the last real one across that
+	// blind spot would let the watcher announce a moment it did not witness,
+	// which is the same mistake as flashing after a feed gap.
+	w.prevGameState = ls.GameState
 
 	switch {
 	case ls.Paused:
@@ -260,6 +287,49 @@ func (w *Watcher) Decide(now time.Time, ls *LineState) (StateValue, WatchStatus)
 	default:
 		return StateIdle, WatchOK
 	}
+}
+
+// draftEndTrigger reports which end-of-draft signal this poll carries, or ""
+// for neither.
+//
+// draft_complete wins when both land on the same poll: it is the earlier and
+// sharper of the two — the last final pick itself, rather than Dota getting
+// round to leaving hero selection afterwards. The game state is what is left
+// when a line sends no draft block, which is every line whose cfg predates the
+// dashboard's v3.99.0 and is the whole reason the fallback exists.
+func (w *Watcher) draftEndTrigger(ls *LineState) string {
+	switch {
+	case w.draftJustCompleted(ls):
+		return triggerPicks
+	case w.leftHeroSelection(ls):
+		return triggerGameState
+	default:
+		return ""
+	}
+}
+
+// leftHeroSelection reports the game_state transition out of the pick/ban
+// phase: the moment the dashboard's own action log calls "Draft → Strategy".
+//
+// "" is not somewhere to have gone, and not somewhere to have come from. The
+// projection publishes null when it cannot see Dota's state, and a watcher that
+// treated that as a destination would flash for a draft that had not ended, or
+// resume an edge across a gap it was blind through.
+func (w *Watcher) leftHeroSelection(ls *LineState) bool {
+	return w.prevGameState == gameStateHeroSelection &&
+		ls.GameState != gameStateHeroSelection &&
+		ls.GameState != ""
+}
+
+// matchStamp names what spent a match's single flash. The match_id where the
+// projection has one; otherwise the line number and the trigger that fired,
+// which is enough to keep the guard non-empty for a match Dota has not named
+// yet — the common case, since the draft ends before the match_id appears.
+func matchStamp(ls *LineState, trigger string) string {
+	if ls.MatchID != nil && *ls.MatchID != "" {
+		return *ls.MatchID
+	}
+	return fmt.Sprintf("line %d · %s", ls.N, trigger)
 }
 
 // draftJustCompleted reports the false→true edge of draft_complete inside one
@@ -276,20 +346,25 @@ func (w *Watcher) draftJustCompleted(ls *LineState) bool {
 	return w.prevDraftComplete != nil && !*w.prevDraftComplete
 }
 
-// forgetIfNewMatch drops the previous draft value when the line has moved on to
-// a different match, so a match abandoned mid-draft cannot lend its `false` to
-// the next match's already-finished draft.
+// forgetIfNewMatch drops both previous levels when the line has moved on to a
+// different match, so a match abandoned mid-draft cannot lend its `false` — or
+// its hero-selection state — to the next match's already-finished draft. The
+// new match also gets its flash back: the guard is per match, not per tray.
 //
 // Only a match_id we can actually see counts — the contract's "where present".
 // The projection publishes null for a match it cannot name yet, and treating
 // null as "a different match" would reset the detector in the middle of the
-// very draft it is watching.
+// very draft it is watching. Learning a name for the first time is likewise not
+// a new match, which is what keeps a flash spent under a null match_id from
+// being handed back the moment Dota names the match it belonged to.
 func (w *Watcher) forgetIfNewMatch(ls *LineState) {
 	if ls.MatchID == nil || *ls.MatchID == "" {
 		return
 	}
 	if w.prevMatchID != "" && *ls.MatchID != w.prevMatchID {
 		w.prevDraftComplete = nil
+		w.prevGameState = ""
+		w.flashedForMatch = ""
 	}
 	w.prevMatchID = *ls.MatchID
 }
@@ -310,6 +385,12 @@ func (w *Watcher) rememberDraft(ls *LineState) {
 func (w *Watcher) forget() {
 	w.prevMatchID = ""
 	w.prevDraftComplete = nil
+	w.prevGameState = ""
+	// Cleared alongside prevMatchID, which is the only thing that re-arms it:
+	// a guard kept without the match identity that releases it would disarm the
+	// beacon for good. Safe, because neither trigger can fire again without a
+	// fresh edge, and both edges have just been forgotten too.
+	w.flashedForMatch = ""
 	w.flashUntil = time.Time{}
 }
 
@@ -375,14 +456,14 @@ func boundLineLabel(ws WatchStatus, line int, label string) string {
 func watchStatusLabel(ws WatchStatus, line int, d WatchDetail) string {
 	switch ws {
 	case WatchOK:
-		label := "● Dashboard: watching"
+		// Which of the two end-of-draft triggers this line will flash on. A
+		// neutral trace, not a warning: both flash, and no cfg needs touching.
+		// It used to say "no draft data (reinstall cfg)", which sent operators
+		// to reinstall a cfg that was never the problem.
 		if d.NoDraftData {
-			// Said BEFORE the draft rather than after: this is the operator's
-			// only warning that the beacon cannot flash at the last pick, and
-			// it names the one thing that fixes it.
-			label += " · no draft data (reinstall cfg)"
+			return "● Dashboard: watching · draft timing: game state"
 		}
-		return label
+		return "● Dashboard: watching · draft timing: picks"
 	case WatchNoGameYet:
 		return "○ Dashboard: idle — no game data yet"
 	case WatchQuiet:

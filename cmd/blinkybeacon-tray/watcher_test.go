@@ -928,17 +928,16 @@ func TestDecide_aNewMatchStillFlashesAtItsOwnDraftEnd(t *testing.T) {
 	}
 }
 
-func TestDecide_leavingHeroSelectionNoLongerFlashes(t *testing.T) {
-	// The owner's ruling retired this trigger: in Captains Mode the hero
-	// selection state outlasts the draft by the whole choose-your-hero stretch,
-	// so leaving it fires at the wrong moment. It is not kept as a fallback —
-	// a flash at the wrong moment is worse than no flash.
+func TestDecide_leavingHeroSelectionFlashesWhenNothingElseWill(t *testing.T) {
+	// This trigger is back, as the fallback. A line whose cfg sends no draft
+	// block has exactly one observable end-of-draft moment, and it is this one:
+	// the same transition the dashboard's action log calls "Draft → Strategy".
 	w := NewWatcher()
 	now := time.Now()
 	w.Decide(now, draftFeed()) // game_state HERO_SELECTION, no draft_complete key
 
-	if state, _ := w.Decide(now.Add(time.Second), liveFeed()); state != StateIdle {
-		t.Errorf("state = %q, want idle — leaving hero selection is not the draft ending", state)
+	if state, _ := w.Decide(now.Add(time.Second), liveFeed()); state != StateFlash {
+		t.Errorf("state = %q, want flash — leaving hero selection is the draft ending, as the dashboard sees it", state)
 	}
 }
 
@@ -1064,21 +1063,243 @@ func TestWatchStatusLabel_callsAFailedPollUnreachable(t *testing.T) {
 	}
 }
 
-func TestWatchStatusLabel_warnsWhenNoDraftDataIsComing(t *testing.T) {
-	// The operator has to learn this BEFORE the draft, not by watching a beacon
-	// that never flashes.
+func TestWatchStatusLabel_namesTheDraftTimingSourceWithoutCallingItBroken(t *testing.T) {
+	// A line with no draft block is no longer degraded: it flashes off the game
+	// state instead. The label says which of the two is in play and stops there
+	// — no warning, and above all no instruction to reinstall anything.
 	got := watchStatusLabel(WatchOK, 1, WatchDetail{NoDraftData: true})
 	if !strings.Contains(got, "watching") {
 		t.Errorf("label = %q, want it to still say the watcher is watching", got)
 	}
-	if !strings.Contains(got, "no draft data (reinstall cfg)") {
-		t.Errorf("label = %q, want it to say no draft data is coming and why", got)
+	if !strings.Contains(got, "draft timing: game state") {
+		t.Errorf("label = %q, want it to name the game state as the timing source", got)
+	}
+	if strings.Contains(got, "reinstall") || strings.Contains(got, "no draft data") {
+		t.Errorf("label = %q, must not tell the operator to reinstall the cfg", got)
 	}
 }
 
-func TestWatchStatusLabel_saysNothingAboutTheDraftWhenTheDataIsFlowing(t *testing.T) {
+func TestWatchStatusLabel_saysTheTimingComesFromThePicksWhenDraftDataIsFlowing(t *testing.T) {
 	got := watchStatusLabel(WatchOK, 1, WatchDetail{})
-	if strings.Contains(got, "draft") {
-		t.Errorf("label = %q, want no draft warning when draft data is arriving", got)
+	if !strings.Contains(got, "draft timing: picks") {
+		t.Errorf("label = %q, want it to name the picks as the timing source", got)
+	}
+	if strings.Contains(got, "reinstall") {
+		t.Errorf("label = %q, must not tell the operator to reinstall anything", got)
+	}
+}
+
+// ------------------------- the draft ending as the dashboard already sees it
+
+// heroSelectionFeed is a live line in the pick/ban phase on a dashboard that
+// sends no draft block at all — the pre-v3.99.0 cfg every existing install
+// already has. match_id is null, which is what the projection publishes until
+// Dota has named the match.
+func heroSelectionFeed() *LineState {
+	ls := liveFeed()
+	ls.N = 1
+	ls.GameState = gameStateHeroSelection
+	ls.MatchID = nil
+	ls.DraftComplete = nil
+	return ls
+}
+
+// strategyTimeFeed is that same line one poll later: the pick/ban phase is
+// over and Dota has moved on. This is the moment the dashboard's own action
+// log records as "Draft → Strategy".
+func strategyTimeFeed() *LineState {
+	ls := heroSelectionFeed()
+	ls.GameState = "DOTA_GAMERULES_STATE_STRATEGY_TIME"
+	return ls
+}
+
+func TestDecide_flashesWhenGameStateLeavesHeroSelectionWithoutDraftData(t *testing.T) {
+	// (i) The whole point of the fallback: a line whose cfg predates
+	// draft_complete still flashes, off the state transition the dashboard has
+	// always been able to see. No reinstall, no draft block, no new field.
+	w := NewWatcher()
+	now := time.Now()
+
+	if state, _ := w.Decide(now, heroSelectionFeed()); state != StateIdle {
+		t.Fatalf("state = %q, want idle while the pick/ban phase is still running", state)
+	}
+
+	armed := now.Add(2 * time.Second)
+	if state, _ := w.Decide(armed, strategyTimeFeed()); state != StateFlash {
+		t.Fatalf("state = %q, want flash when game_state leaves hero selection", state)
+	}
+	if state, _ := w.Decide(armed.Add(15*time.Second), strategyTimeFeed()); state != StateFlash {
+		t.Errorf("at t+15s exactly: state = %q, want flash — the flash is 15s", state)
+	}
+	if state, _ := w.Decide(armed.Add(15100*time.Millisecond), strategyTimeFeed()); state != StateIdle {
+		t.Errorf("after the 15s flash: state = %q, want idle", state)
+	}
+}
+
+func TestDecide_theDraftCompleteEdgeSpendsTheOnlyFlashOfTheMatch(t *testing.T) {
+	// (ii) draft_complete is the earlier and more precise of the two triggers.
+	// Having fired, the state transition that follows it in the SAME match is
+	// the second trigger, and is ignored.
+	w := NewWatcher()
+	now := time.Now()
+
+	w.Decide(now, draftingFeed())
+	if state, _ := w.Decide(now.Add(2*time.Second), draftDoneFeed()); state != StateFlash {
+		t.Fatalf("state = %q, want flash at the last final pick", state)
+	}
+	if state, _ := w.Decide(now.Add(20*time.Second), draftDoneFeed()); state != StateIdle {
+		t.Fatalf("state = %q, want idle once the 15s are spent", state)
+	}
+
+	exit := draftDoneFeed() // same match, now leaving hero selection
+	exit.GameState = "DOTA_GAMERULES_STATE_STRATEGY_TIME"
+	if state, _ := w.Decide(now.Add(22*time.Second), exit); state != StateIdle {
+		t.Errorf("state = %q, want idle — one flash per match, and it has been spent", state)
+	}
+}
+
+func TestDecide_aLateDraftCompleteDoesNotFlashAfterTheStateTransitionDid(t *testing.T) {
+	// (iii) The other order, and the harder one: the transition fired while the
+	// match was still unnamed, and the draft block only turns up afterwards.
+	// Learning the match's name is not the same as a new match.
+	w := NewWatcher()
+	now := time.Now()
+
+	w.Decide(now, heroSelectionFeed())
+	if state, _ := w.Decide(now.Add(2*time.Second), strategyTimeFeed()); state != StateFlash {
+		t.Fatalf("state = %q, want flash at the state transition", state)
+	}
+	if state, _ := w.Decide(now.Add(20*time.Second), strategyTimeFeed()); state != StateIdle {
+		t.Fatalf("state = %q, want idle once the 15s are spent", state)
+	}
+
+	drafting := strategyTimeFeed()
+	drafting.MatchID = strPtr("7891234567")
+	drafting.DraftComplete = boolPtr(false)
+	w.Decide(now.Add(22*time.Second), drafting)
+
+	done := strategyTimeFeed()
+	done.MatchID = strPtr("7891234567")
+	done.DraftComplete = boolPtr(true)
+	if state, _ := w.Decide(now.Add(24*time.Second), done); state != StateIdle {
+		t.Errorf("state = %q, want idle — this match has already had its flash", state)
+	}
+}
+
+func TestDecide_aNewMatchReArmsTheStateTransitionFlash(t *testing.T) {
+	// (iv) The guard is per match, not per tray lifetime.
+	w := NewWatcher()
+	now := time.Now()
+
+	matchA := heroSelectionFeed()
+	matchA.MatchID = strPtr("7891234567")
+	exitA := strategyTimeFeed()
+	exitA.MatchID = strPtr("7891234567")
+	w.Decide(now, matchA)
+	if state, _ := w.Decide(now.Add(2*time.Second), exitA); state != StateFlash {
+		t.Fatalf("state = %q, want flash at match A's draft end", state)
+	}
+	if state, _ := w.Decide(now.Add(20*time.Second), exitA); state != StateIdle {
+		t.Fatalf("state = %q, want idle once match A's flash is spent", state)
+	}
+
+	matchB := heroSelectionFeed()
+	matchB.MatchID = strPtr("7891234599")
+	exitB := strategyTimeFeed()
+	exitB.MatchID = strPtr("7891234599")
+	w.Decide(now.Add(22*time.Second), matchB)
+	if state, _ := w.Decide(now.Add(24*time.Second), exitB); state != StateFlash {
+		t.Errorf("state = %q, want flash — a new match_id re-arms the one flash", state)
+	}
+}
+
+func TestDecide_aTrayThatStartsPastBothEventsNeverFlashes(t *testing.T) {
+	// (v) No transition to see and no false to edge off. The moment it would be
+	// announcing passed before this tray was watching.
+	w := NewWatcher()
+	now := time.Now()
+
+	for i := range 5 {
+		at := now.Add(time.Duration(i) * 2 * time.Second)
+		if state, _ := w.Decide(at, liveFeed()); state != StateIdle {
+			t.Fatalf("poll %d: state = %q, want idle", i, state)
+		}
+	}
+
+	late := liveFeed()
+	late.MatchID = strPtr("7891234567")
+	late.DraftComplete = boolPtr(true)
+	if state, _ := w.Decide(now.Add(12*time.Second), late); state != StateIdle {
+		t.Errorf("state = %q, want idle — a late start stays dark for that match", state)
+	}
+}
+
+func TestDecide_pauseOutranksTheStateTransitionFlash(t *testing.T) {
+	// (vi) Unchanged precedence: a pause is the longer-lived truth.
+	w := NewWatcher()
+	now := time.Now()
+
+	w.Decide(now, heroSelectionFeed())
+	if state, _ := w.Decide(now.Add(2*time.Second), strategyTimeFeed()); state != StateFlash {
+		t.Fatalf("state = %q, want flash", state)
+	}
+
+	paused := strategyTimeFeed()
+	paused.Paused = true
+	if state, _ := w.Decide(now.Add(4*time.Second), paused); state != StateSpin {
+		t.Errorf("state = %q, want spin — a pause outranks the flash", state)
+	}
+}
+
+func TestDecide_aNullGameStateIsNeverATransition(t *testing.T) {
+	// (vii) game_state decodes to "" when the projection publishes null: the
+	// dashboard cannot see Dota's state. That is an absence of news, not the
+	// draft ending — in either direction, and not across either.
+	blank := func() *LineState {
+		ls := heroSelectionFeed()
+		ls.GameState = ""
+		return ls
+	}
+
+	t.Run("hero selection to null", func(t *testing.T) {
+		w := NewWatcher()
+		now := time.Now()
+		w.Decide(now, heroSelectionFeed())
+		if state, _ := w.Decide(now.Add(2*time.Second), blank()); state != StateIdle {
+			t.Errorf("state = %q, want idle — a null game_state is not somewhere to have gone", state)
+		}
+	})
+
+	t.Run("null to strategy time", func(t *testing.T) {
+		w := NewWatcher()
+		now := time.Now()
+		w.Decide(now, blank())
+		if state, _ := w.Decide(now.Add(2*time.Second), strategyTimeFeed()); state != StateIdle {
+			t.Errorf("state = %q, want idle — we never saw a draft to see it end", state)
+		}
+	})
+
+	t.Run("a null blip is not resumed across", func(t *testing.T) {
+		w := NewWatcher()
+		now := time.Now()
+		w.Decide(now, heroSelectionFeed())
+		w.Decide(now.Add(2*time.Second), blank())
+		if state, _ := w.Decide(now.Add(4*time.Second), strategyTimeFeed()); state != StateIdle {
+			t.Errorf("state = %q, want idle — the watcher was blind across the moment it would announce", state)
+		}
+	})
+}
+
+func TestDecide_feedLossSpanningTheStateTransitionDoesNotFlashLate(t *testing.T) {
+	// Same rule the draft_complete edge has always had: a gap that swallowed
+	// the moment is not a reason to announce it once the feed returns.
+	w := NewWatcher()
+	now := time.Now()
+
+	w.Decide(now, heroSelectionFeed())
+	w.Decide(now.Add(2*time.Second), nil) // the dashboard goes away mid-draft
+
+	if state, _ := w.Decide(now.Add(90*time.Second), strategyTimeFeed()); state != StateIdle {
+		t.Errorf("state = %q, want idle — no retroactive flash after a feed gap", state)
 	}
 }

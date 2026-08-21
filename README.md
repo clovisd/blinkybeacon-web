@@ -18,13 +18,15 @@ A Windows system tray app that:
 - Settings UI accessible from the tray menu (opens in browser)
 - Optional auto-start at Windows login via registry
 - **Watches a LIVE Dashboard line** and drives the beacon by itself — flash for
-  15 seconds when the draft ends (all picks and bans complete, i.e. the last
-  final pick of the pick/ban phase — not when the hero-selection screen goes
-  away), spin for the duration of any pause. The tracked PC's cfg must be
-  reinstalled from its install link once the dashboard is on v3.99.0 or later,
-  or the tray says `no draft data (reinstall cfg)` and the draft flash never
-  fires. Needs a dashboard API
-  token; see [BEACON-DASHBOARD.md](BEACON-DASHBOARD.md)
+  15 seconds when the draft ends, spin for the duration of any pause.
+  **No cfg reinstall is required:** the flash fires at the end of the pick/ban
+  phase as the dashboard sees it (the game state leaving hero selection — the
+  same moment the dashboard's action log calls "Strategy"), or at the last final
+  pick on lines that publish draft detail, whichever comes first, once per
+  match. Reinstalling the tracked PC's cfg from its install link on a dashboard
+  running v3.99.0 or later makes it land at the last pick itself — optional, not
+  required. Needs a dashboard API token; see
+  [BEACON-DASHBOARD.md](BEACON-DASHBOARD.md)
 
 ### Download
 
