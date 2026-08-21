@@ -1386,3 +1386,44 @@ func TestSaveConfig_leavesNoTemporaryFilesBehind(t *testing.T) {
 		}
 	}
 }
+
+// pausedByDirePayload is a paused line the dashboard has attributed to dire —
+// the v3.101.0 projection, with pause_party appended last.
+const pausedByDirePayload = `{"v":0,"n":1,"label":"Line A","running":true,"match_id":"7891234567","game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","paused":true,"seconds_since_gsi":0.6,"ts":1765500000,"draft_complete":true,"pause_party":"dire"}`
+
+func TestWatchLoop_newBeaconSettingsReachTheRunningWatcher(t *testing.T) {
+	// The settings page saves a Config; main.go pushes it down restartCh; the
+	// loop re-reads it every tick. None of that is worth anything unless the
+	// WATCHER — built once, before the operator touched anything — is rebuilt
+	// from it. Same line, same token, same URL: only the light rule changes.
+	stub := newStubDashboard(pausedByDirePayload)
+	srv := httptest.NewServer(stub)
+	defer srv.Close()
+
+	app := NewAppState()
+	app.SetBeacon(&countingBeacon{})
+
+	var mu sync.Mutex
+	cfg := defaultConfig()
+	cfg.DashboardURL, cfg.LineNumber, cfg.APIToken = srv.URL, 1, testToken
+	getCfg := func() Config {
+		mu.Lock()
+		defer mu.Unlock()
+		return cfg
+	}
+	startWatchLoop(t, app, srv.Client(), getCfg, 5*time.Millisecond)
+
+	waitFor(t, `the beacon to spin for dire's pause under "both"`, func() bool {
+		state, _, _ := app.Get()
+		return state == StateSpin
+	})
+
+	mu.Lock()
+	cfg.PauseSide = pauseSideRadiant
+	mu.Unlock()
+
+	waitFor(t, "the light to go out once only radiant's pauses count", func() bool {
+		state, _, _ := app.Get()
+		return state == StateIdle
+	})
+}

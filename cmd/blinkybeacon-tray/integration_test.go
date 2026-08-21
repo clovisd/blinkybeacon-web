@@ -88,7 +88,7 @@ func TestIntegration_decodesTheRealDashboardProjection(t *testing.T) {
 		t.Error("ts is 0 — the server sends its own wall clock")
 	}
 
-	state, status := NewWatcher().Decide(time.Now(), ls)
+	state, status := NewWatcher(defaultSettings()).Decide(time.Now(), ls)
 	t.Logf("Decide -> state=%q status=%q (running=%v paused=%v game_state=%q seconds_since_gsi=%v)",
 		state, status, ls.Running, ls.Paused, ls.GameState, ls.SecondsSinceGSI)
 	if state != StateIdle {

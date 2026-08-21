@@ -304,7 +304,7 @@ func TestFetchLineState_errorsOnNonJSON(t *testing.T) {
 // ------------------------------------------------- level-driven decisions
 
 func TestDecide_idleWhileDraftIsStillRunning(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	state, status := w.Decide(now, draftFeed())
 	if state != StateIdle {
@@ -319,7 +319,7 @@ func TestDecide_flashesAfterAMissedPollAcrossTheLastPick(t *testing.T) {
 	// The edge is between two polls, not between two clock ticks: a gap that
 	// swallows several polls still leaves false on one side and true on the
 	// other, and the draft still ended.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, draftingFeed())
 
@@ -330,7 +330,7 @@ func TestDecide_flashesAfterAMissedPollAcrossTheLastPick(t *testing.T) {
 
 func TestDecide_pollingAnUnfinishedDraftNeverFlashes(t *testing.T) {
 	// false on its own is not an edge, however many times it arrives.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	for i := 0; i < 5; i++ {
 		state, _ := w.Decide(now.Add(time.Duration(i)*time.Second), draftingFeed())
@@ -341,7 +341,7 @@ func TestDecide_pollingAnUnfinishedDraftNeverFlashes(t *testing.T) {
 }
 
 func TestDecide_spinsWhilePaused(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	ls := liveFeed()
 	ls.Paused = true
 	if state, status := w.Decide(time.Now(), ls); state != StateSpin || status != WatchOK {
@@ -350,7 +350,7 @@ func TestDecide_spinsWhilePaused(t *testing.T) {
 }
 
 func TestDecide_stopsWhenThePauseEnds(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	paused := liveFeed()
 	paused.Paused = true
@@ -364,7 +364,7 @@ func TestDecide_stopsWhenThePauseEnds(t *testing.T) {
 func TestDecide_restartMidPauseSpinsImmediately(t *testing.T) {
 	// A freshly started watcher has seen no transitions at all. Level-driven
 	// means the very first poll of a paused line must already spin.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	ls := liveFeed()
 	ls.Paused = true
 	if state, _ := w.Decide(time.Now(), ls); state != StateSpin {
@@ -375,7 +375,7 @@ func TestDecide_restartMidPauseSpinsImmediately(t *testing.T) {
 func TestDecide_flashDoesNotResumeAfterAPauseSwallowsIt(t *testing.T) {
 	// The pause covered the whole flash window; when it lifts, the flash is
 	// long expired and must not come back.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, draftingFeed())
 	w.Decide(now, draftDoneFeed()) // flashing until t+15s
@@ -392,7 +392,7 @@ func TestDecide_flashDoesNotResumeAfterAPauseSwallowsIt(t *testing.T) {
 func TestDecide_restartMidDraftDoesNotFlashOnItsFirstPoll(t *testing.T) {
 	// First poll ever lands on GAME_IN_PROGRESS. We have no evidence a draft
 	// just ended, so we must not invent a flash.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	if state, _ := w.Decide(time.Now(), liveFeed()); state != StateIdle {
 		t.Errorf("state = %q, want idle on a cold first poll", state)
 	}
@@ -401,7 +401,7 @@ func TestDecide_restartMidDraftDoesNotFlashOnItsFirstPoll(t *testing.T) {
 // ------------------------------------------------------------- feed loss
 
 func TestDecide_feedLostWhenThePollFails(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	state, status := w.Decide(time.Now(), nil)
 	if state != StateIdle {
 		t.Errorf("state = %q, want idle (dark) on a failed poll", state)
@@ -413,7 +413,7 @@ func TestDecide_feedLostWhenThePollFails(t *testing.T) {
 
 func TestDecide_feedLostDuringAPauseGoesDark(t *testing.T) {
 	// Never a confident wrong light: a stale `paused` must not keep spinning.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	paused := liveFeed()
 	paused.Paused = true
@@ -431,7 +431,7 @@ func TestDecide_feedLostDuringAPauseGoesDark(t *testing.T) {
 }
 
 func TestDecide_staleGSIOutranksAPause(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	ls := liveFeed()
 	ls.Paused = true
 	ls.SecondsSinceGSI = secs(feedLostAfterSeconds + 1)
@@ -441,7 +441,7 @@ func TestDecide_staleGSIOutranksAPause(t *testing.T) {
 }
 
 func TestDecide_feedLossCancelsAPendingFlash(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, draftingFeed())
 	w.Decide(now, draftDoneFeed()) // flashing until t+15s
@@ -456,7 +456,7 @@ func TestDecide_feedLossCancelsAPendingFlash(t *testing.T) {
 }
 
 func TestDecide_recoversToSpinIfTheLineIsStillPaused(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, nil)
 
@@ -475,7 +475,7 @@ func TestDecide_stoppedLineIsDarkEvenWhilePausedOnAFreshFeed(t *testing.T) {
 	//
 	// The pre-existing stopped-line test also had a null seconds_since_gsi,
 	// which darkens the beacon by itself, so it never isolated `running`.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	ls := &LineState{
 		Running:         false,
 		Paused:          true,
@@ -494,7 +494,7 @@ func TestDecide_stoppedLineIsDarkEvenWhilePausedOnAFreshFeed(t *testing.T) {
 func TestDecide_notRunningLineIsNotAFeedLoss(t *testing.T) {
 	// `running: false` means the line is not accepting GSI. It is a calm idle,
 	// not a broken feed — but it must never light the beacon.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	ls := &LineState{Paused: false, GameState: "", SecondsSinceGSI: nil, Running: false}
 	if state, _ := w.Decide(time.Now(), ls); state != StateIdle {
 		t.Errorf("state = %q, want idle for a stopped line", state)
@@ -824,7 +824,7 @@ func TestFetchLineState_absentDraftCompleteDecodesTheSameAsNull(t *testing.T) {
 func TestDecide_flashesWhenTheLastPickCompletesTheDraft(t *testing.T) {
 	// The owner's ruling: "'Draft ended' means when all picks and bans have
 	// completed" — the false→true edge, not the end of hero selection.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	if state, _ := w.Decide(now, draftingFeed()); state != StateIdle {
 		t.Fatalf("state = %q, want idle while picks are still outstanding", state)
@@ -836,7 +836,7 @@ func TestDecide_flashesWhenTheLastPickCompletesTheDraft(t *testing.T) {
 }
 
 func TestDecide_flashLastsFifteenSecondsThenIdles(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, draftingFeed())
 	w.Decide(now, draftDoneFeed()) // the flash is armed at `now`
@@ -856,7 +856,7 @@ func TestDecide_lateStartOnAnAlreadyCompletedDraftDoesNotFlash(t *testing.T) {
 	// A tray that starts polling after the draft finished has never seen false.
 	// null→true is not an edge: flashing here would announce a moment that
 	// passed before the tray was even watching.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 
 	unknown := liveFeed()
@@ -874,7 +874,7 @@ func TestDecide_lateStartOnAnAlreadyCompletedDraftDoesNotFlash(t *testing.T) {
 func TestDecide_aColdStartOnACompletedDraftDoesNotFlash(t *testing.T) {
 	// The very first poll the watcher ever takes already says true. There is no
 	// previous value at all, so there is no edge.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	if state, _ := w.Decide(time.Now(), draftDoneFeed()); state != StateIdle {
 		t.Errorf("state = %q, want idle on a cold first poll of a completed draft", state)
 	}
@@ -883,7 +883,7 @@ func TestDecide_aColdStartOnACompletedDraftDoesNotFlash(t *testing.T) {
 func TestDecide_aStickyCompletedDraftDoesNotReFlash(t *testing.T) {
 	// draft_complete stays true for the rest of the match. Every later poll is
 	// true→true, which must not re-arm the flash.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, draftingFeed())
 	w.Decide(now, draftDoneFeed()) // flashing until t+15s
@@ -900,7 +900,7 @@ func TestDecide_aNewMatchResetsTheDraftEdge(t *testing.T) {
 	// Match A was abandoned mid-draft; match B is already drafted by the time
 	// we see it. Carrying A's false across the boundary would fire a flash for
 	// a draft this tray never watched.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, draftingFeed()) // match 7891234567, false
 
@@ -913,7 +913,7 @@ func TestDecide_aNewMatchResetsTheDraftEdge(t *testing.T) {
 
 func TestDecide_aNewMatchStillFlashesAtItsOwnDraftEnd(t *testing.T) {
 	// The reset must forget the old match, not deafen the watcher.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, draftDoneFeed()) // match 7891234567 finished its draft
 
@@ -932,7 +932,7 @@ func TestDecide_leavingHeroSelectionFlashesWhenNothingElseWill(t *testing.T) {
 	// This trigger is back, as the fallback. A line whose cfg sends no draft
 	// block has exactly one observable end-of-draft moment, and it is this one:
 	// the same transition the dashboard's action log calls "Draft → Strategy".
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, draftFeed()) // game_state HERO_SELECTION, no draft_complete key
 
@@ -942,7 +942,7 @@ func TestDecide_leavingHeroSelectionFlashesWhenNothingElseWill(t *testing.T) {
 }
 
 func TestDecide_pauseOutranksTheDraftFlash(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, draftingFeed())
 	w.Decide(now, draftDoneFeed()) // flashing until t+15s
@@ -957,7 +957,7 @@ func TestDecide_pauseOutranksTheDraftFlash(t *testing.T) {
 func TestDecide_feedLossSpanningTheLastPickDoesNotFlashLate(t *testing.T) {
 	// The gap swallowed the moment the draft completed. Firing on recovery
 	// would tell the desk "the draft just ended" a minute late.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	w.Decide(now, draftingFeed())
 	w.Decide(now.Add(2*time.Second), nil) // the feed dies mid-draft
@@ -968,7 +968,7 @@ func TestDecide_feedLossSpanningTheLastPickDoesNotFlashLate(t *testing.T) {
 }
 
 func TestDecide_stoppedLineDoesNotFlashWhenItsDraftCompletes(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 	drafting := draftingFeed()
 	drafting.Running = false
@@ -986,7 +986,7 @@ func TestDecide_stoppedLineDoesNotFlashWhenItsDraftCompletes(t *testing.T) {
 func TestDecide_neverHeardFromDotaIsNotAFeedLoss(t *testing.T) {
 	// A line that has never heard from Dota since it started is idle, not
 	// broken. The light is the same dark; only the words change.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	ls := liveFeed()
 	ls.SecondsSinceGSI = nil
 	state, status := w.Decide(time.Now(), ls)
@@ -999,7 +999,7 @@ func TestDecide_neverHeardFromDotaIsNotAFeedLoss(t *testing.T) {
 }
 
 func TestDecide_aFeedThatWasFlowingAndStoppedIsCalledQuiet(t *testing.T) {
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	ls := liveFeed()
 	ls.SecondsSinceGSI = secs(feedLostAfterSeconds + 1)
 	state, status := w.Decide(time.Now(), ls)
@@ -1117,7 +1117,7 @@ func TestDecide_flashesWhenGameStateLeavesHeroSelectionWithoutDraftData(t *testi
 	// (i) The whole point of the fallback: a line whose cfg predates
 	// draft_complete still flashes, off the state transition the dashboard has
 	// always been able to see. No reinstall, no draft block, no new field.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 
 	if state, _ := w.Decide(now, heroSelectionFeed()); state != StateIdle {
@@ -1140,7 +1140,7 @@ func TestDecide_theDraftCompleteEdgeSpendsTheOnlyFlashOfTheMatch(t *testing.T) {
 	// (ii) draft_complete is the earlier and more precise of the two triggers.
 	// Having fired, the state transition that follows it in the SAME match is
 	// the second trigger, and is ignored.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 
 	w.Decide(now, draftingFeed())
@@ -1162,7 +1162,7 @@ func TestDecide_aLateDraftCompleteDoesNotFlashAfterTheStateTransitionDid(t *test
 	// (iii) The other order, and the harder one: the transition fired while the
 	// match was still unnamed, and the draft block only turns up afterwards.
 	// Learning the match's name is not the same as a new match.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 
 	w.Decide(now, heroSelectionFeed())
@@ -1188,7 +1188,7 @@ func TestDecide_aLateDraftCompleteDoesNotFlashAfterTheStateTransitionDid(t *test
 
 func TestDecide_aNewMatchReArmsTheStateTransitionFlash(t *testing.T) {
 	// (iv) The guard is per match, not per tray lifetime.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 
 	matchA := heroSelectionFeed()
@@ -1216,7 +1216,7 @@ func TestDecide_aNewMatchReArmsTheStateTransitionFlash(t *testing.T) {
 func TestDecide_aTrayThatStartsPastBothEventsNeverFlashes(t *testing.T) {
 	// (v) No transition to see and no false to edge off. The moment it would be
 	// announcing passed before this tray was watching.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 
 	for i := range 5 {
@@ -1236,7 +1236,7 @@ func TestDecide_aTrayThatStartsPastBothEventsNeverFlashes(t *testing.T) {
 
 func TestDecide_pauseOutranksTheStateTransitionFlash(t *testing.T) {
 	// (vi) Unchanged precedence: a pause is the longer-lived truth.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 
 	w.Decide(now, heroSelectionFeed())
@@ -1262,7 +1262,7 @@ func TestDecide_aNullGameStateIsNeverATransition(t *testing.T) {
 	}
 
 	t.Run("hero selection to null", func(t *testing.T) {
-		w := NewWatcher()
+		w := NewWatcher(defaultSettings())
 		now := time.Now()
 		w.Decide(now, heroSelectionFeed())
 		if state, _ := w.Decide(now.Add(2*time.Second), blank()); state != StateIdle {
@@ -1271,7 +1271,7 @@ func TestDecide_aNullGameStateIsNeverATransition(t *testing.T) {
 	})
 
 	t.Run("null to strategy time", func(t *testing.T) {
-		w := NewWatcher()
+		w := NewWatcher(defaultSettings())
 		now := time.Now()
 		w.Decide(now, blank())
 		if state, _ := w.Decide(now.Add(2*time.Second), strategyTimeFeed()); state != StateIdle {
@@ -1280,7 +1280,7 @@ func TestDecide_aNullGameStateIsNeverATransition(t *testing.T) {
 	})
 
 	t.Run("a null blip is not resumed across", func(t *testing.T) {
-		w := NewWatcher()
+		w := NewWatcher(defaultSettings())
 		now := time.Now()
 		w.Decide(now, heroSelectionFeed())
 		w.Decide(now.Add(2*time.Second), blank())
@@ -1293,7 +1293,7 @@ func TestDecide_aNullGameStateIsNeverATransition(t *testing.T) {
 func TestDecide_feedLossSpanningTheStateTransitionDoesNotFlashLate(t *testing.T) {
 	// Same rule the draft_complete edge has always had: a gap that swallowed
 	// the moment is not a reason to announce it once the feed returns.
-	w := NewWatcher()
+	w := NewWatcher(defaultSettings())
 	now := time.Now()
 
 	w.Decide(now, heroSelectionFeed())
