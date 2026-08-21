@@ -17,12 +17,22 @@ type Config struct {
 const defaultAddr = "127.0.0.1"
 const defaultPort = 1337
 
-func configFilePath() (string, error) {
+// configDir is where the config file lives: beside the executable.
+// A variable so tests can point it somewhere disposable.
+var configDir = func() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine executable path: %w", err)
 	}
-	return filepath.Join(filepath.Dir(exe), "blinkybeacon-config.json"), nil
+	return filepath.Dir(exe), nil
+}
+
+func configFilePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "blinkybeacon-config.json"), nil
 }
 
 // loadConfig reads the config file and returns its contents, or defaults if the
@@ -49,6 +59,10 @@ func loadConfig() Config {
 	return cfg
 }
 
+// configFileMode keeps the config file to its owner. It decides which interface
+// the control API is bound to, and forks of this app keep credentials in it.
+const configFileMode = 0o600
+
 // saveConfig writes cfg to the config file next to the executable.
 func saveConfig(cfg Config) error {
 	path, err := configFilePath()
@@ -59,5 +73,31 @@ func saveConfig(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	// Write a NEW owner-only file and rename it over the old one, rather than
+	// truncating the old one in place.
+	//
+	// os.WriteFile's mode only applies when it CREATES the file, so writing
+	// over a 0644 config an older build left behind would keep it world-
+	// readable. A fresh 0600 file plus an atomic rename has no such window,
+	// and as a bonus no reader ever sees a half-written config.
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".blinkybeacon-config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // a no-op once the rename below has succeeded
+
+	if err := tmp.Chmod(configFileMode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }

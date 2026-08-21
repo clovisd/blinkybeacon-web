@@ -1,10 +1,15 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const settingsFormHTML = `<!DOCTYPE html>
@@ -28,6 +33,7 @@ button:hover{background:#106ebe}
 <body>
 <h1>BlinkyBeacon Settings</h1>
 <form method="POST" action="/settings">
+<input type="hidden" name="csrf" value="%s">
 <div class="field">
   <label for="addr">Bind Address</label>
   <input id="addr" name="addr" type="text" value="%s" placeholder="127.0.0.1">
@@ -59,17 +65,59 @@ const settingsSavedHTML = `<!DOCTYPE html>
 
 type settingsHandler struct {
 	onSave func(Config)
+
+	csrfOnce sync.Once
+	csrfTok  string
+}
+
+// csrf is this process's settings-form token, minted on first use.
+//
+// /settings has no login, so the only thing separating "the operator clicked
+// Save" from "a web page the operator happened to visit auto-submitted a form
+// at 127.0.0.1:1337" is proof that whoever is posting could also READ the form.
+// A cross-origin page cannot: the browser will happily send it a form POST, but
+// will not let it see the GET response. So a random value planted in the form
+// and required back on submit is exactly the missing proof. Without it a
+// forged save could rebind the control API to 0.0.0.0 for the whole network.
+func (h *settingsHandler) csrf() string {
+	h.csrfOnce.Do(func() {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return // leave it empty: csrfOK then refuses everything
+		}
+		h.csrfTok = hex.EncodeToString(b)
+	})
+	return h.csrfTok
+}
+
+// csrfOK reports whether a submitted token matches. It fails closed: if we
+// never got randomness, nothing is accepted, because a settings form that
+// cannot be defended is worse than one that cannot be saved.
+func (h *settingsHandler) csrfOK(got string) bool {
+	want := h.csrf()
+	if want == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func (h *settingsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 	cfg := loadConfig()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, settingsFormHTML, cfg.Addr, cfg.Port)
+	// The bind address is user-supplied and lands inside an HTML attribute.
+	// /settings has no auth and can be bound to 0.0.0.0, so treat it as hostile.
+	fmt.Fprintf(w, settingsFormHTML, h.csrf(), html.EscapeString(cfg.Addr), cfg.Port)
 }
 
 func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if !h.csrfOK(r.FormValue("csrf")) {
+		http.Error(w, "this settings form is stale or was not served by this app — "+
+			"reopen Settings from the tray menu and try again", http.StatusForbidden)
 		return
 	}
 
@@ -92,8 +140,13 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	newListenAddr := fmt.Sprintf("%s:%d", addr, port)
 	settingsURL := "http://" + newListenAddr + "/settings"
 
+	// Escaped for the same reason as the form above; the CONFIG keeps the raw
+	// value, only this rendering is escaped.
+	safeAddr := html.EscapeString(newListenAddr)
+	safeURL := html.EscapeString(settingsURL)
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, settingsSavedHTML, settingsURL, newListenAddr, settingsURL)
+	fmt.Fprintf(w, settingsSavedHTML, safeURL, safeAddr, safeURL)
 
 	if h.onSave != nil {
 		go h.onSave(newCfg)
