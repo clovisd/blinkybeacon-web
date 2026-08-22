@@ -12,10 +12,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # right now we only build on linux due to needing OS libraries available
-        # if you can think of a way to spew out macOS and Windows binaries, please submit a PR!
+        # This is the upstream fsbeacon CLI release, kept as inherited. It builds
+        # on Linux only, and only for the host's own architecture: the CLI needs
+        # libudev through cgo, and the apt-installed libudev-dev on an amd64
+        # runner cannot be linked into a 386 or arm64 binary — those two legs
+        # failed on every release. The tray app (Windows + macOS) is built by
+        # build.yml, not here.
         goos: [linux]
-        goarch: ["386", amd64, arm64]
+        goarch: [amd64]
     steps:
       - uses: actions/checkout@v3
       - uses: wangyoucao577/go-release-action@v1
@@ -23,7 +27,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           goos: ${{ matrix.goos }}
           goarch: ${{ matrix.goarch }}
-          goversion: "1.19"
+          goversion: "1.25"   # go.mod says 1.25.0; the 1.19 parser rejects three-part versions
           pre_command: "apt-get update && apt-get install -y libudev-dev libusb-1.0-0-dev"
           project_path: "./cmd/fsbeacon"
           binary_name: "fsbeacon"
