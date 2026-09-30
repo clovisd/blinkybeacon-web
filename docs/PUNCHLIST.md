@@ -40,7 +40,7 @@ the owner's answers to its questions (MASTER-DEV
 - owner: the API token expires — dashboard tokens live 180 days (S79a spec) and the beacon's mint date is recorded nowhere. At expiry the tray says `token rejected` and the light goes dark; mint a fresh one by mid-February 2027 (the earliest possible expiry, about 2027-02-16).
 - watch: the dashboard's subdomain move — the owner's plan to serve the API from `api.dash.cl6.us` (S79 owner rulings, 2026-08-12), still planned with no date (owner, 2026-09-30): if a beacon's Dashboard URL has to change, the tray clears its saved token and each beacon needs it pasted again.
 - parked: CSRF on /spin /flash /stop — the same hole the settings form closed (b1-token retro, 2026-08-20). The owner lifted the Companion freeze for this fix only (2026-09-30): the module sends a token (S17), then the tray checks it (S18).
-- owner: approved 2026-09-30, once the macOS check passes — promote both releases out of prerelease: `gh release edit v0.4.0 --repo clovisd/blinkybeacon-web --prerelease=false --latest` · `gh release edit dashboard-v0.7.0 --repo clovisd/blinkybeacon-web --prerelease=false --latest=false`
+- owner: approved 2026-09-30, once the macOS and replug checks pass — promote both releases out of prerelease: `gh release edit v0.4.0 --repo clovisd/blinkybeacon-web --prerelease=false --latest` · `gh release edit dashboard-v0.7.0 --repo clovisd/blinkybeacon-web --prerelease=false --latest=false`
 - Re-commit `tools/protocol-fuzzer` (the tool and its testing guide) from `origin/protocol-fuzzer` in a pull request under the owner's name; the old commit's author field cannot land on `main`. The branch stays (owner, 2026-09-30).
 
 ## Documented quirks
