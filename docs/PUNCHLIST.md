@@ -17,7 +17,10 @@ as `origin/main` carries it.
 - A source written as `sessions/…` or "retro" is in MASTER-DEV; the retros are
   `sessions/retros/<date>-blinkybeacon-<stage>.md`.
 
-**Written 2026-09-30** by the same audit as the stage tracker.
+**Written 2026-09-30** by the same audit as the stage tracker, and **updated the same day** with
+the owner's answers to its questions (MASTER-DEV
+`sessions/retros/assets/2026-09-30-owner-answers/batch-1.md`). An item that says *owner,
+2026-09-30* takes its words from those answers.
 
 ## Queue
 
@@ -34,12 +37,11 @@ as `origin/main` carries it.
 - Once-per-match draft flash: a loop-level test (dashboard line) — written and then dropped; the guard is proven only at `Decide` (b3-state-fallback retro, 2026-08-21).
 - A settings save without a light setting resets it to the default (dashboard line) instead of keeping the saved value; only a stale settings tab sends such a form (b4-settings retro, 2026-08-21).
 - watch: a second API token revokes the beacon's — the dashboard keeps one `lines:read` token, so minting one for another consumer darkens every beacon. Until DOTA-LIVE-DASHBOARD #75 is settled, mint no other (dotabot match-telemetry retros, 2026-08-20/21).
-- owner: the API token expires — dashboard tokens live 180 days (S79a spec) and the beacon's mint date is recorded nowhere. At expiry the tray says `token rejected` and the light goes dark; mint a new one before then.
-- watch: the dashboard's subdomain move — the owner's plan to serve the API from `api.dash.cl6.us` (S79 owner rulings, 2026-08-12): if a beacon's Dashboard URL has to change, the tray clears its saved token and each beacon needs it pasted again.
-- watch: `match_id` on non-public lines — if the dashboard nulls it (DOTA-LIVE-DASHBOARD #72 Q1, open), the new-lobby flash never fires on those lines and the draft flash re-arms only after a feed loss.
-- parked: CSRF on /spin /flash /stop — the same hole the settings form closed; it stays open while the Bitfocus Companion module calls these routes without a token and the owner keeps that module frozen (b1-token retro, 2026-08-20).
-- owner: GitHub's "Latest" release is still v0.3.2 (May 2026); v0.4.0 and dashboard-v0.7.0 are prereleases. Promote them after the macOS check, or leave them as they are.
-- owner: the protocol-fuzzer branch — `origin/protocol-fuzzer` (2026-05-21) holds a raw-HID test tool that was never merged; its finding (three fixed modes) is already in README.md. Merge the tool or delete the branch.
+- owner: the API token expires — dashboard tokens live 180 days (S79a spec) and the beacon's mint date is recorded nowhere. At expiry the tray says `token rejected` and the light goes dark; mint a fresh one by mid-February 2027 (the earliest possible expiry, about 2027-02-16).
+- watch: the dashboard's subdomain move — the owner's plan to serve the API from `api.dash.cl6.us` (S79 owner rulings, 2026-08-12), still planned with no date (owner, 2026-09-30): if a beacon's Dashboard URL has to change, the tray clears its saved token and each beacon needs it pasted again.
+- parked: CSRF on /spin /flash /stop — the same hole the settings form closed (b1-token retro, 2026-08-20). The owner lifted the Companion freeze for this fix only (2026-09-30): the module sends a token (S17), then the tray checks it (S18).
+- owner: approved 2026-09-30, once the macOS and replug checks pass — promote both releases out of prerelease: `gh release edit v0.4.0 --repo clovisd/blinkybeacon-web --prerelease=false --latest` · `gh release edit dashboard-v0.7.0 --repo clovisd/blinkybeacon-web --prerelease=false --latest=false`
+- Re-commit `tools/protocol-fuzzer` (the tool and its testing guide) from `origin/protocol-fuzzer` in a pull request under the owner's name; the old commit's author field cannot land on `main`. The branch stays (owner, 2026-09-30).
 
 ## Documented quirks
 
@@ -67,3 +69,4 @@ Real, known, and deliberately not queued: each one is told to users or recorded 
 - The "undelayed observer client" sentence in the user guide — `dfd1cec` (dashboard-v0.2.0), 2026-08-20.
 - A Windows tray job in `release.yaml` — replaced by `.github/workflows/build.yml` — `7333845` (v0.4.0), 2026-08-21.
 - A "Test connection" button — replaced by the line picker's reasons on the settings page (`token rejected`, `unreachable`, `no token`) — dashboard-v0.4.0, 2026-08-20.
+- `match_id` on non-public lines stays published, so nothing changes in the tray — the owner's answer to DOTA-LIVE-DASHBOARD #72 Q1, 2026-09-30.
