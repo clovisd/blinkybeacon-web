@@ -8,6 +8,9 @@ on:
 jobs:
   release:
     name: Release Binaries
+    # The dashboard line's releases carry the tray app only, built by
+    # build.yml. This upstream CLI job stays as inherited for every other tag.
+    if: ${{ !startsWith(github.event.release.tag_name, 'dashboard-v') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
