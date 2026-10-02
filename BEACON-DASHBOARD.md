@@ -317,6 +317,9 @@ app mid-pause immediately spins.
   first one seen spends the match's flash and the second is ignored. "All picks
   in" also stays true for the rest of the game, so later polls don't re-flash.
   A new match starts the detector over.
+- **One extra flash is possible between matches.** When a match is abandoned
+  during the draft and the next one is first seen with its draft already
+  finished, the light may flash once for that draft.
 - **The two flashes have separate once-per-match guards.** A match can have its
   lobby flash and its draft-end flash; it cannot have two of either.
 - **Losing the feed forgets both.** If the dashboard goes away and comes back,

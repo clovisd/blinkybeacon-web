@@ -911,6 +911,29 @@ func TestDecide_aNewMatchResetsTheDraftEdge(t *testing.T) {
 	}
 }
 
+func TestDecide_aMatchAbandonedMidDraftThenTheNextFirstSeenDraftedWithANullIDFlashesOnce(t *testing.T) {
+	// Today's behaviour at this boundary, pinned on purpose and written down
+	// in the user guide. The same two matches as above, except that match B's
+	// first poll carries no match_id yet. Null means "not named yet", never "a
+	// different match" — the reading that keeps a draft which completes on the
+	// very poll its id first appears from losing its flash — so A's false is
+	// still the level remembered, and B's true reads as the last pick landing.
+	// The light flashes once, for a draft this tray never watched. Telling the
+	// two apart needs the dashboard to publish more than it does.
+	w := NewWatcher(defaultSettings())
+	now := time.Now()
+	w.Decide(now, draftingFeed()) // match 7891234567, picks outstanding, then abandoned
+
+	matchB := draftDoneFeed()
+	matchB.MatchID = nil // the next match: not named yet, every pick already in
+	if state, _ := w.Decide(now.Add(2*time.Second), matchB); state != StateFlash {
+		t.Errorf("state = %q, want flash — the boundary is invisible under a null match_id", state)
+	}
+	if state, _ := w.Decide(now.Add(20*time.Second), matchB); state != StateIdle {
+		t.Errorf("state = %q, want idle — it flashes once, not again", state)
+	}
+}
+
 func TestDecide_aNewMatchStillFlashesAtItsOwnDraftEnd(t *testing.T) {
 	// The reset must forget the old match, not deafen the watcher.
 	w := NewWatcher(defaultSettings())
