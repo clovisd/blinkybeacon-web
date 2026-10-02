@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -288,23 +289,40 @@ func TestWatchLoop_flashesOncePerMatchAndANewMatchReArmsIt(t *testing.T) {
 		strategyTime  = "DOTA_GAMERULES_STATE_STRATEGY_TIME"
 		inProgress    = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
 	)
-	dash := &sequenceDashboard{seq: []string{
+	match1 := []string{
 		v0Line("8000000001", heroSelection, false),
 		v0Line("8000000001", heroSelection, true), // the last pick: flash
 		v0Line("8000000001", heroSelection, true), // flash over, light dark
 		v0Line("8000000001", strategyTime, true),  // hero selection ends: same draft
 		v0Line("8000000001", inProgress, true),
+	}
+	match2 := []string{
 		v0Line("8000000002", heroSelection, false), // the next match
 		v0Line("8000000002", heroSelection, true),  // its last pick: flash again
 		v0Line("8000000002", heroSelection, true),
 		v0Line("8000000002", strategyTime, true),
 		v0Line("8000000002", inProgress, true),
-	}}
-	srv := httptest.NewServer(dash)
+	}
+	dash := &sequenceDashboard{seq: append(append([]string{}, match1...), match2...)}
+
+	// Match 2's first poll is held until the test has counted match 1's
+	// flashes. The loop polls one at a time, so when that request arrives
+	// every poll of match 1 has been decided and applied.
+	reached, release := make(chan struct{}), make(chan struct{})
+	signalReached, releaseHeld := sync.OnceFunc(func() { close(reached) }), sync.OnceFunc(func() { close(release) })
+	gated := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if dash.pollCount() == len(match1) {
+			signalReached()
+			<-release
+		}
+		dash.ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(gated)
 	defer srv.Close()
+	defer releaseHeld()
 
 	app := NewAppState()
-	b := &countingBeacon{}
+	b := &flashCounter{}
 	app.SetBeacon(b)
 
 	cfg := defaultConfig()
@@ -322,14 +340,32 @@ func TestWatchLoop_flashesOncePerMatchAndANewMatchReArmsIt(t *testing.T) {
 		defer close(done)
 		runWatchLoop(ctx, app, srv.Client(), func() Config { return cfg }, settings)
 	}()
-	waitFor(t, "both matches to be polled through", func() bool { return dash.pollCount() > len(dash.seq)+2 })
-	cancel()
-	<-done // the loop has stopped: the beacon's counters are ours to read
+	defer func() { cancel(); <-done }()
 
-	if b.flashes != 2 {
-		t.Errorf("Flash called %d times over two matches, want 2 — one per match", b.flashes)
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for match 1 to be polled through")
+	}
+	if n := b.flashes.Load(); n != 1 {
+		t.Errorf("Flash called %d times over match 1, want 1", n)
+	}
+	releaseHeld()
+
+	waitFor(t, "match 2 to be polled through", func() bool { return dash.pollCount() > len(dash.seq)+2 })
+	if n := b.flashes.Load(); n != 2 {
+		t.Errorf("Flash called %d times over two matches, want 2 — one per match", n)
 	}
 }
+
+// flashCounter is a beacon whose Flash count can be read while the loop is
+// still driving it.
+type flashCounter struct{ flashes atomic.Int32 }
+
+func (b *flashCounter) Flash() error { b.flashes.Add(1); return nil }
+func (b *flashCounter) Spin() error  { return nil }
+func (b *flashCounter) Stop() error  { return nil }
+func (b *flashCounter) Close() error { return nil }
 
 func TestWatchLoop_flashesWhenHeroSelectionEndsOnAnUnreinstalledCfg(t *testing.T) {
 	// The fallback, end to end: a dashboard that sends no draft_complete at all
