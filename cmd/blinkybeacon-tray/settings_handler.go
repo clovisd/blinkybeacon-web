@@ -127,6 +127,10 @@ type settingsHandler struct {
 	// point it at a fixture; nil means the default, which is every real build.
 	client *http.Client
 
+	// lineList remembers the dashboard's line list for a few seconds, so
+	// loading this page does not always mean a request to the dashboard.
+	lineList lineListCache
+
 	csrfOnce sync.Once
 	csrfTok  string
 }
@@ -427,14 +431,16 @@ const linesFetchTimeout = 3 * time.Second
 // it did not. The page renders either way — this is a settings window, and it
 // must open even when the thing it configures is unreachable.
 func (h *settingsHandler) lineField(cfg Config) string {
-	client := h.client
-	if client == nil {
-		client = &http.Client{Timeout: linesFetchTimeout}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), linesFetchTimeout)
-	defer cancel()
-
-	lines, err := fetchLines(ctx, client, cfg.DashboardURL, cfg.APIToken)
+	key := lineListKey{dashboardURL: cfg.DashboardURL, token: cfg.APIToken}
+	lines, err := h.lineList.get(key, func() ([]lineSummary, error) {
+		client := h.client
+		if client == nil {
+			client = &http.Client{Timeout: linesFetchTimeout}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), linesFetchTimeout)
+		defer cancel()
+		return fetchLines(ctx, client, cfg.DashboardURL, cfg.APIToken)
+	})
 	switch {
 	case err != nil:
 		return lineNumberFieldHTML(cfg.LineNumber, pickerUnavailableReason(err))
