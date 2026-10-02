@@ -125,3 +125,64 @@ func TestWatchLoop_pollsNeverOverlapAtTheFastestInterval(t *testing.T) {
 		}
 	})
 }
+
+func TestWatchLoop_aNewPollIntervalAloneDoesNotRebuildTheWatcher(t *testing.T) {
+	// A hand-edited poll_interval_ms reaches the loop with the next settings
+	// save, possibly mid-draft. Nothing the watcher remembers depends on the
+	// cadence, so it must not be rebuilt for it: a rebuild would cut off the
+	// flash that is running and, having forgotten the match's spent flash,
+	// fire again when hero selection ends.
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			heroSelection = "DOTA_GAMERULES_STATE_HERO_SELECTION"
+			strategyTime  = "DOTA_GAMERULES_STATE_STRATEGY_TIME"
+			inProgress    = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
+		)
+		dash := &sequenceDashboard{seq: []string{
+			v0Line("8000000001", heroSelection, false), // t=0
+			v0Line("8000000001", heroSelection, true),  // t=2: the last pick, a 15s flash
+			v0Line("8000000001", heroSelection, true),  // t=4: first poll at the new interval's settings
+			v0Line("8000000001", strategyTime, true),   // t=5: hero selection ends
+			v0Line("8000000001", inProgress, true),
+		}}
+		app := NewAppState()
+		b := &countingBeacon{}
+		app.SetBeacon(b)
+
+		var mu sync.Mutex
+		cfg := boundConfig() // the defaults: 2s polls, a 15s draft flash
+		getCfg := func() Config {
+			mu.Lock()
+			defer mu.Unlock()
+			return cfg
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			runWatchLoop(ctx, app, &http.Client{Transport: inProcessTransport{dash}}, getCfg, watcherSettings)
+		}()
+
+		time.Sleep(3 * time.Second) // the flash is running
+		mu.Lock()
+		cfg.PollIntervalMs = 1000
+		mu.Unlock()
+		time.Sleep(7500 * time.Millisecond) // to t=10.5, still inside the flash
+		synctest.Wait()
+		state, _, _ := app.Get()
+		polls := dash.pollCount()
+		cancel()
+		<-done
+
+		if state != StateFlash {
+			t.Errorf("state = %q at t=10.5s, want flash — the 15s flash from t=2 was cut off", state)
+		}
+		if b.flashes != 1 || b.stops != 0 {
+			t.Errorf("Flash called %d times and Stop %d, want 1 and 0 — one flash, running throughout",
+				b.flashes, b.stops)
+		}
+		if polls != 9 { // 0, 2, 4, then every second to 10
+			t.Errorf("%d polls by t=10.5s, want 9 — the new interval still takes effect", polls)
+		}
+	})
+}

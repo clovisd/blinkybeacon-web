@@ -75,8 +75,8 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 				w = NewWatcher(set)
 				lastTarget, lastSettings = target, set
 				log.Printf("Watching %s", target)
-			case set != lastSettings:
-				// The operator saved new beacon settings. Rebuilt rather than
+			case set.withoutPollInterval() != lastSettings.withoutPollInterval():
+				// The operator saved new light settings. Rebuilt rather than
 				// patched, because half this watcher's state is about how long
 				// a flash that is ALREADY RUNNING has left — and that answer
 				// belongs to the settings it was armed under.
@@ -84,6 +84,13 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 				lastSettings = set
 				log.Printf("Beacon settings changed: flash %v, lobby flash %v, pauses %s, poll every %v",
 					set.FlashDuration, set.LobbyFlash, set.PauseSide, set.PollInterval)
+			case set.PollInterval != lastSettings.PollInterval:
+				// Only the cadence moved. Nothing the watcher remembers depends
+				// on it, so the watcher is kept — a rebuild here would cut off a
+				// running flash and hand a spent one back. The wait below reads
+				// the new interval directly.
+				lastSettings = set
+				log.Printf("Poll interval changed: every %v", set.PollInterval)
 			}
 
 			pollCtx, cancel := context.WithTimeout(ctx, pollTimeout)

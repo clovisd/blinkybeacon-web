@@ -309,6 +309,14 @@ func watcherSettings(cfg Config) WatcherSettings {
 	return s
 }
 
+// withoutPollInterval is the settings with the loop's cadence taken out:
+// everything Decide's answers depend on, and so everything a change to which
+// calls for a new watcher.
+func (s WatcherSettings) withoutPollInterval() WatcherSettings {
+	s.PollInterval = 0
+	return s
+}
+
 func NewWatcher(s WatcherSettings) *Watcher { return &Watcher{set: s} }
 
 // Decide returns the beacon mode and the feed status for one poll.
