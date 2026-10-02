@@ -78,8 +78,8 @@ release on a `dashboard-v*` tag.
 Command-line flags override saved config on first launch and save for future runs:
 
 ```
-blinkybeacon-tray.exe                           # use saved config (default: 127.0.0.1:1337)
-blinkybeacon-tray.exe --addr 0.0.0.0 --port 1338
+BB-DASH.exe                           # use saved config (default: 127.0.0.1:1337)
+BB-DASH.exe --addr 0.0.0.0 --port 1338
 ```
 
 ### HTTP API

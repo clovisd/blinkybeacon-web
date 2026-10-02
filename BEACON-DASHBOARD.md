@@ -205,8 +205,14 @@ Lower means the light reacts sooner — a pause or the end of the draft shows on
 the beacon within about one interval — and the dashboard gets more requests:
 at `500` the beacon asks four times as often as at the default. Higher is
 gentler on the dashboard and slower to react. A missing key, or a value outside
-the range, runs at the default. However low it is set, the app never has more
-than one request out at a time.
+the range, runs at the default. However low it is set, the watcher never has
+more than one poll out at a time.
+
+Type the value as a bare whole number — `"poll_interval_ms": 750`, no quotes.
+A file the app cannot read — a quoted number such as `"750"`, a decimal such as
+`750.0`, a missing comma — makes **every** setting fall back to its default,
+the dashboard URL and token included. Fix the file before you save from the
+settings page, or the save writes those defaults over it.
 
 The file is read when the app starts, and again whenever the settings page
 saves; a save keeps whatever value the file holds. See
