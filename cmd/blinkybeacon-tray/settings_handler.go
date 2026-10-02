@@ -311,6 +311,9 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		LobbyFlash:        lobbyFlash,
 		LobbyFlashSeconds: lobbyFlashSeconds,
 		PauseSide:         pauseSide,
+		// Not on the form: the config file is the only place it is set, so a
+		// save keeps whatever the file says rather than resetting it.
+		PollIntervalMs: saved.PollIntervalMs,
 	}
 	if err := saveConfig(newCfg); err != nil {
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)

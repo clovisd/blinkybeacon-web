@@ -741,3 +741,43 @@ func TestSettingsForm_apiDocsFollowTheSavedBindAddress(t *testing.T) {
 		t.Errorf("API examples should fall back to 127.0.0.1 when bound to all interfaces")
 	}
 }
+
+// ----------------------------------------- what the form does not carry
+
+func TestSettingsPost_keepsAHandEditedPollInterval(t *testing.T) {
+	// poll_interval_ms is a config-file-only key: the form has no field for it.
+	// The POST builds its Config from the form, so unless the key is carried
+	// over from the file, every save — of anything — quietly puts the
+	// operator's hand edit back to the default.
+	withTempConfig(t)
+	srv := httptest.NewServer(newStubLineList(fourLines))
+	defer srv.Close()
+	writeRawConfig(t, strings.NewReplacer(
+		`"https://dashboard.example.com"`, `"`+srv.URL+`"`,
+		`"pause_side": "dire"`, `"pause_side": "dire",
+  "poll_interval_ms": 750`,
+	).Replace(v070ConfigFile))
+
+	h := &settingsHandler{client: srv.Client()}
+	saved := make(chan Config, 1)
+	h.onSave = func(c Config) { saved <- c }
+
+	form := beaconLightForm()
+	form.Set("dashboard_url", srv.URL)
+	form.Set("flash_seconds", "30") // the operator came to change something else
+	if w := submitSettings(t, h, form); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	if got := loadConfig().PollIntervalMs; got != 750 {
+		t.Errorf("PollIntervalMs = %d after a save, want the hand-edited 750", got)
+	}
+	select {
+	case c := <-saved:
+		if c.PollIntervalMs != 750 {
+			t.Errorf("the rebind carried PollIntervalMs %d, want 750", c.PollIntervalMs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("saving the form did not trigger the watcher rebind")
+	}
+}

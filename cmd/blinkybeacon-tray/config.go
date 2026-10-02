@@ -41,6 +41,10 @@ type Config struct {
 	// "dire". Anything else is not a filter the operator asked for, and loads
 	// as "both" — see validPauseSide.
 	PauseSide string `json:"pause_side"`
+	// PollIntervalMs is how often, in milliseconds, the watcher asks the
+	// dashboard for the line. Config file only: the settings page has no
+	// control for it, so a save carries over whatever the file already says.
+	PollIntervalMs int `json:"poll_interval_ms"`
 }
 
 // The three beacon-light settings, defaulted to v0.5.0's behaviour exactly: a
@@ -85,6 +89,21 @@ func validPauseSide(s string) bool {
 		return true
 	}
 	return false
+}
+
+// The poll interval's default and bounds, in milliseconds. Two seconds is the
+// cadence every earlier release polled at. Half a second is the floor the
+// dashboard's read-API design proposed for a client; ten seconds is as slow as
+// a light that is meant to announce a moment can afford to look.
+const (
+	defaultPollIntervalMs = 2000
+	minPollIntervalMs     = 500
+	maxPollIntervalMs     = 10000
+)
+
+// validPollIntervalMs reports whether a poll interval is one we will run.
+func validPollIntervalMs(n int) bool {
+	return n >= minPollIntervalMs && n <= maxPollIntervalMs
 }
 
 const defaultAddr = "127.0.0.1"
@@ -143,6 +162,9 @@ func loadConfig() Config {
 	if !validPauseSide(cfg.PauseSide) {
 		cfg.PauseSide = defaultPauseSide
 	}
+	if !validPollIntervalMs(cfg.PollIntervalMs) {
+		cfg.PollIntervalMs = defaultPollIntervalMs
+	}
 	return cfg
 }
 
@@ -154,6 +176,7 @@ func defaultConfig() Config {
 		FlashSeconds:      defaultFlashSeconds,
 		LobbyFlashSeconds: defaultLobbyFlashSeconds,
 		PauseSide:         defaultPauseSide,
+		PollIntervalMs:    defaultPollIntervalMs,
 	}
 }
 

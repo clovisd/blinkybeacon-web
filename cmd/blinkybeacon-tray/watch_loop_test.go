@@ -142,11 +142,29 @@ func postSettings(t *testing.T, h *settingsHandler, form url.Values) *httptest.R
 // artefact: it is the same read the shipped loop does on every tick.
 func startWatchLoop(t *testing.T, app *AppState, client *http.Client, cfg func() Config, interval time.Duration) {
 	t.Helper()
+	startWatchLoopWith(t, app, client, cfg, pollEvery(interval))
+}
+
+// pollEvery is the settings every build uses, polling at interval instead of
+// the config's cadence: these tests run against a real socket, so they spend
+// real time, and half a second a poll is too slow to wait for.
+func pollEvery(interval time.Duration) func(Config) WatcherSettings {
+	return func(c Config) WatcherSettings {
+		s := watcherSettings(c)
+		s.PollInterval = interval
+		return s
+	}
+}
+
+// startWatchLoopWith is startWatchLoop for a test that needs to adjust more of
+// the watcher's settings than the cadence.
+func startWatchLoopWith(t *testing.T, app *AppState, client *http.Client, cfg func() Config, settings func(Config) WatcherSettings) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runWatchLoop(ctx, app, client, cfg, interval)
+		runWatchLoop(ctx, app, client, cfg, settings)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -350,7 +368,7 @@ func TestWatchLoop_stopsWhenTheContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runWatchLoop(ctx, app, srv.Client(), func() Config { return cfg }, 5*time.Millisecond)
+		runWatchLoop(ctx, app, srv.Client(), func() Config { return cfg }, pollEvery(5*time.Millisecond))
 		close(done)
 	}()
 
