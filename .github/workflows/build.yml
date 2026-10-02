@@ -1,6 +1,10 @@
 # Builds blinkybeacon-tray for every platform it ships on, on every push to a
 # release branch, and attaches the binaries to the GitHub release on a tag.
 #
+# This line's releases name the files BB-DASH: BB-DASH.exe and
+# BB-DASH-macos-<arch>.zip, each with a .sha256 beside it. Inside the zip the
+# app and the bare binary keep their names.
+#
 # Windows is cross-compiled from Linux with mingw — the same line as
 # BUILD_WINDOWS.md, so the CI .exe hashes the same as a local one from the same
 # commit. macOS cannot be cross-compiled from Linux (systray needs Cocoa and
@@ -36,12 +40,12 @@ jobs:
           mkdir -p dist
           GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
             go build -trimpath -ldflags='-H windowsgui -buildid=' \
-            -o dist/blinkybeacon-tray.exe ./cmd/blinkybeacon-tray/
-          file dist/blinkybeacon-tray.exe
-          (cd dist && sha256sum blinkybeacon-tray.exe | tee blinkybeacon-tray.exe.sha256)
+            -o dist/BB-DASH.exe ./cmd/blinkybeacon-tray/
+          file dist/BB-DASH.exe
+          (cd dist && sha256sum BB-DASH.exe | tee BB-DASH.exe.sha256)
       - uses: actions/upload-artifact@v4
         with:
-          name: blinkybeacon-tray-windows-amd64
+          name: BB-DASH-windows-amd64
           path: dist/*
           if-no-files-found: error
 
@@ -75,11 +79,11 @@ jobs:
         run: |
           BUNDLE_VERSION="${GITHUB_REF_NAME#*v}" scripts/macos-bundle.sh dist/blinkybeacon-tray dist/BlinkyBeacon.app
           # zip keeps the executable bit; the artifact store does not.
-          (cd dist && zip -qr "blinkybeacon-tray-macos-${{ matrix.arch }}.zip" BlinkyBeacon.app blinkybeacon-tray)
-          (cd dist && shasum -a 256 "blinkybeacon-tray-macos-${{ matrix.arch }}.zip" | tee "blinkybeacon-tray-macos-${{ matrix.arch }}.zip.sha256")
+          (cd dist && zip -qr "BB-DASH-macos-${{ matrix.arch }}.zip" BlinkyBeacon.app blinkybeacon-tray)
+          (cd dist && shasum -a 256 "BB-DASH-macos-${{ matrix.arch }}.zip" | tee "BB-DASH-macos-${{ matrix.arch }}.zip.sha256")
       - uses: actions/upload-artifact@v4
         with:
-          name: blinkybeacon-tray-macos-${{ matrix.arch }}
+          name: BB-DASH-macos-${{ matrix.arch }}
           path: |
             dist/*.zip
             dist/*.sha256

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 )
 
 // errNoDashboardURL and errNoToken are the two "nothing is wrong, you just
@@ -118,4 +120,90 @@ func getJSON(ctx context.Context, client *http.Client, target, token string, out
 		return fmt.Errorf("decoding %s: %w", target, err)
 	}
 	return nil
+}
+
+// lineListTTL is how long the settings page keeps one answer to "which lines
+// does this dashboard have?" — a list or a failure alike.
+//
+// GET /settings has no login, so a web page the operator happens to visit can
+// load it over and over. Without this, every load sent the dashboard a request
+// carrying the token, and waited up to linesFetchTimeout for it.
+const lineListTTL = 5 * time.Second
+
+// lineListCache asks a dashboard for its line list at most once per
+// lineListTTL for each dashboard URL and token. Page loads that arrive while a
+// request is out wait for it rather than sending their own. The zero value is
+// ready to use.
+type lineListCache struct {
+	// now is the clock answers are timed by; nil means time.Now.
+	now func() time.Time
+
+	mu      sync.Mutex
+	entries map[lineListKey]*lineListEntry
+}
+
+// lineListKey is what an answer belongs to. A different URL or token is a
+// different dashboard, or a different view of one, and gets its own request.
+type lineListKey struct {
+	dashboardURL string
+	token        string
+}
+
+// lineListEntry is one request: in flight until done is closed, then an
+// answer stamped with when it arrived. Every field but done is written once,
+// before done is closed, and read only after.
+type lineListEntry struct {
+	done  chan struct{}
+	at    time.Time
+	lines []lineSummary
+	err   error
+}
+
+func (e *lineListEntry) answered() bool {
+	select {
+	case <-e.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// get returns the line list for key: the answer from the last lineListTTL if
+// there is one, the request already out if there is one, and otherwise the
+// answer to a new request made with fetch.
+func (c *lineListCache) get(key lineListKey, fetch func() ([]lineSummary, error)) ([]lineSummary, error) {
+	c.mu.Lock()
+	now := c.clock()
+	for k, e := range c.entries {
+		if e.answered() && now.Sub(e.at) >= lineListTTL {
+			delete(c.entries, k)
+		}
+	}
+	if e, ok := c.entries[key]; ok {
+		c.mu.Unlock()
+		<-e.done
+		return e.lines, e.err
+	}
+	e := &lineListEntry{done: make(chan struct{})}
+	if c.entries == nil {
+		c.entries = map[lineListKey]*lineListEntry{}
+	}
+	c.entries[key] = e
+	c.mu.Unlock()
+
+	// Deferred, so that page loads waiting on this request are released even
+	// if it never returns normally.
+	defer func() {
+		e.at = c.clock()
+		close(e.done)
+	}()
+	e.lines, e.err = fetch()
+	return e.lines, e.err
+}
+
+func (c *lineListCache) clock() time.Time {
+	if c.now == nil {
+		return time.Now()
+	}
+	return c.now()
 }

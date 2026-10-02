@@ -424,3 +424,19 @@ func TestWatcherSettings_substitutesDefaultsForNonsense(t *testing.T) {
 		t.Errorf("PauseSide = %q, want %q", got.PauseSide, pauseSideBoth)
 	}
 }
+
+func TestWatcherSettings_carriesThePollInterval(t *testing.T) {
+	if got := watcherSettings(Config{PollIntervalMs: 750}).PollInterval; got != 750*time.Millisecond {
+		t.Errorf("PollInterval = %v, want 750ms", got)
+	}
+}
+
+func TestWatcherSettings_pollsEveryTwoSecondsWhenTheIntervalIsOutOfRange(t *testing.T) {
+	// A Config that never went through loadConfig — main.go's flags, a test —
+	// can carry a zero, and a zero interval is a loop that never waits.
+	for _, ms := range []int{0, -1, 499, 10001} {
+		if got := watcherSettings(Config{PollIntervalMs: ms}).PollInterval; got != 2*time.Second {
+			t.Errorf("PollIntervalMs %d gave PollInterval %v, want the default 2s", ms, got)
+		}
+	}
+}

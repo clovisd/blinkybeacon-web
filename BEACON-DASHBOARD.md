@@ -38,7 +38,8 @@ which one is in play on that line — `draft timing: picks` or
 > that is the difference between the pick and the choose-your-hero stretch that
 > follows it. Everything works without doing this.
 
-It polls the dashboard every 2 seconds over the dashboard's read API,
+It polls the dashboard every 2 seconds (you can change that — see
+[section 4](#4-tuning-the-light)) over the dashboard's read API,
 `/api/v0/lines/<N>`, using an **API token** that a dashboard admin mints for
 you. Without that token the watcher does not poll at all — see
 [section 3](#3-get-a-token-and-paste-it-in).
@@ -47,13 +48,27 @@ you. Without that token the watcher does not poll at all — see
 
 ## 1. Get the app running
 
-1. Download `blinkybeacon-tray.exe` from the release, or build it yourself —
-   see [BUILD_WINDOWS.md](BUILD_WINDOWS.md).
+1. Download `BB-DASH.exe` from the release, or build it yourself —
+   see [BUILD_WINDOWS.md](BUILD_WINDOWS.md). On a Mac it is
+   `BB-DASH-macos-arm64.zip` (Apple Silicon) or `BB-DASH-macos-amd64.zip`
+   (Intel), each holding `BlinkyBeacon.app` — see the [README](README.md#download).
+   Every file has a `.sha256` beside it.
 2. Put it in a folder of its own. It writes `blinkybeacon-config.json` next to
    itself, so don't leave it in `Downloads`.
 3. Plug the beacon in over USB.
 4. Double-click the `.exe`. A tray icon appears (bottom-right, possibly under
    the `^` arrow). There is no window — that's normal.
+
+> **Upgrading on Windows from a release that shipped `blinkybeacon-tray.exe`?**
+> Only the file name has changed.
+>
+> 1. Put `BB-DASH.exe` in the **same folder** as the old program. Your settings
+>    live in `blinkybeacon-config.json` beside it, and that is where the new
+>    program looks for them.
+> 2. Quit the old program from its tray menu, and delete `blinkybeacon-tray.exe`.
+> 3. Start `BB-DASH.exe`. If **Start with Windows** was on, tick it again: it
+>    shows unticked until you do, because Windows is still set to start the
+>    old file.
 
 The tray menu's top line tells you whether the beacon was found:
 
@@ -142,7 +157,7 @@ Some things worth knowing about the token:
   save again. That check is what stops a web page you happened to visit from
   quietly repointing the app — and your token — at somebody else's server.
 - **Revoking it on the dashboard is instant.** The beacon goes dark on the very
-  next poll, within about 2 seconds.
+  next poll, within about 2 seconds at the default cadence.
 
 ## 4. Tuning the light
 
@@ -178,6 +193,30 @@ beacon simply flashes until the later of the two finishes.
 >
 > Even on a new enough dashboard, an **admin pause** and one the dashboard
 > could not attribute count as neither side: they spin only under *Both sides*.
+
+**How often it asks the dashboard** is set in the config file only — there is
+no control for it on the settings page:
+
+| Key | Default | Range |
+|---|---|---|
+| `poll_interval_ms` | `2000` (2 seconds) | `500`–`10000` milliseconds |
+
+Lower means the light reacts sooner — a pause or the end of the draft shows on
+the beacon within about one interval — and the dashboard gets more requests:
+at `500` the beacon asks four times as often as at the default. Higher is
+gentler on the dashboard and slower to react. A missing key, or a value outside
+the range, runs at the default. However low it is set, the watcher never has
+more than one poll out at a time.
+
+Type the value as a bare whole number — `"poll_interval_ms": 750`, no quotes.
+A file the app cannot read — a quoted number such as `"750"`, a decimal such as
+`750.0`, a missing comma — makes **every** setting fall back to its default,
+the dashboard URL and token included. Fix the file before you save from the
+settings page, or the save writes those defaults over it.
+
+The file is read when the app starts, and again whenever the settings page
+saves; a save keeps whatever value the file holds. See
+[section 7](#7-details-worth-knowing) for where the file is.
 
 ## 5. What each light means
 
@@ -304,7 +343,8 @@ app mid-pause immediately spins.
 
 ## 7. Details worth knowing
 
-- **Polls every 2 seconds**, so the light can lag reality by up to ~2 seconds.
+- **Polls every 2 seconds** unless `poll_interval_ms` says otherwise, so the
+  light can lag reality by up to one interval — ~2 seconds at the default.
 - **The feed counts as quiet** if the dashboard hasn't heard from Dota for more
   than 30 seconds. During a legitimate pause Dota still checks in about every 10
   seconds, so a real pause is never mistaken for a dead feed.
@@ -317,6 +357,9 @@ app mid-pause immediately spins.
   first one seen spends the match's flash and the second is ignored. "All picks
   in" also stays true for the rest of the game, so later polls don't re-flash.
   A new match starts the detector over.
+- **One extra flash is possible between matches.** When a match is abandoned
+  during the draft and the next one is first seen with its draft already
+  finished, the light may flash once for that draft.
 - **The two flashes have separate once-per-match guards.** A match can have its
   lobby flash and its draft-end flash; it cannot have two of either.
 - **Losing the feed forgets both.** If the dashboard goes away and comes back,
@@ -327,7 +370,7 @@ app mid-pause immediately spins.
   briefly can't see Dota's state, the watcher does not flash on the way into or
   out of that gap — same rule as a dropped feed.
 - **A rejected token backs the polling off to 30 seconds.** Every other state
-  keeps the normal 2-second cadence.
+  keeps the configured cadence.
 - **A dashboard restart shows `idle — no game data yet` until Dota next checks
   in.** The
   dashboard reports "never heard from Dota" rather than a number it inherited
@@ -348,13 +391,15 @@ app mid-pause immediately spins.
     "flash_seconds": 15,
     "lobby_flash": false,
     "lobby_flash_seconds": 10,
-    "pause_side": "both"
+    "pause_side": "both",
+    "poll_interval_ms": 2000
   }
   ```
 
-  The last four are the [section 4](#4-tuning-the-light) settings.
+  The last five are the [section 4](#4-tuning-the-light) settings.
   `pause_side` is `both`, `radiant` or `dire`; both durations are 1–600
-  seconds. **A missing key, or one out of range, loads as its default** rather
+  seconds; `poll_interval_ms` is 500–10000 and is set here only.
+  **A missing key, or one out of range, loads as its default** rather
   than stopping the app — so a file written by v0.5.0 keeps working untouched.
   (The settings page is stricter: type 900 there and it says no, instead of
   quietly saving 15.)

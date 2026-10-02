@@ -44,9 +44,14 @@ releases are tagged `dashboard-v*`):
 
 | File | Platform |
 |---|---|
-| `blinkybeacon-tray.exe` | Windows x64 |
-| `blinkybeacon-tray-macos-arm64.zip` | macOS, Apple Silicon (`BlinkyBeacon.app` + bare binary) |
-| `blinkybeacon-tray-macos-amd64.zip` | macOS, Intel |
+| `BB-DASH.exe` | Windows x64 |
+| `BB-DASH-macos-arm64.zip` | macOS, Apple Silicon (`BlinkyBeacon.app` + bare binary) |
+| `BB-DASH-macos-amd64.zip` | macOS, Intel |
+
+Earlier releases of this line named them `blinkybeacon-tray.exe` and
+`blinkybeacon-tray-macos-<arch>.zip`. Upgrading on Windows: put `BB-DASH.exe` in
+the old program's folder, where its settings are — see
+[BEACON-DASHBOARD.md §1](BEACON-DASHBOARD.md#1-get-the-app-running).
 
 Every file ships with a `.sha256` beside it. The macOS builds are not signed or
 notarized: on first launch right-click → Open, or
@@ -73,8 +78,8 @@ release on a `dashboard-v*` tag.
 Command-line flags override saved config on first launch and save for future runs:
 
 ```
-blinkybeacon-tray.exe                           # use saved config (default: 127.0.0.1:1337)
-blinkybeacon-tray.exe --addr 0.0.0.0 --port 1338
+BB-DASH.exe                           # use saved config (default: 127.0.0.1:1337)
+BB-DASH.exe --addr 0.0.0.0 --port 1338
 ```
 
 ### HTTP API

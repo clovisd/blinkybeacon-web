@@ -9,15 +9,22 @@ import (
 )
 
 // pollTimeout bounds a single poll so a hung dashboard cannot wedge the loop.
-// Comfortably under pollInterval, so a dead dashboard is noticed promptly.
+//
+// At the fastest poll_interval_ms it is longer than the interval itself, and
+// that is fine: the loop only starts waiting once a poll has returned, so polls
+// never overlap. A dashboard that hangs is asked again one interval after the
+// poll gave up, not one interval after it began.
 const pollTimeout = 1500 * time.Millisecond
 
 // runWatchLoop polls the dashboard and drives the beacon until ctx is done.
 //
 // The config is re-read every tick, so saving new settings retargets the
-// watcher — new URL, new line, new token — without restarting the app.
-func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg func() Config, interval time.Duration) {
-	w := NewWatcher(watcherSettings(cfg()))
+// watcher — new URL, new line, new token, new cadence — without restarting the
+// app. settings turns each tick's Config into the watcher's settings; every
+// build passes watcherSettings, and a test passes its own to poll faster than
+// the config's half-second floor allows.
+func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg func() Config, settings func(Config) WatcherSettings) {
+	w := NewWatcher(settings(cfg()))
 	lastTarget := ""
 	// The beacon settings the live watcher was built with. Saving new ones has
 	// to reach a watcher that was built before they existed, and the honest way
@@ -26,6 +33,7 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 
 	for {
 		c := cfg()
+		set := settings(c)
 		app.SetWatchLine(c.LineNumber)
 		status := WatchOff
 		// The words the tray puts to that status. Recomputed every tick from
@@ -60,7 +68,6 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 			}
 			status = unbound
 		} else {
-			set := watcherSettings(c)
 			switch {
 			case target != lastTarget:
 				// Retargeted. Whatever the previous line was doing is not ours
@@ -68,15 +75,22 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 				w = NewWatcher(set)
 				lastTarget, lastSettings = target, set
 				log.Printf("Watching %s", target)
-			case set != lastSettings:
-				// The operator saved new beacon settings. Rebuilt rather than
+			case set.withoutPollInterval() != lastSettings.withoutPollInterval():
+				// The operator saved new light settings. Rebuilt rather than
 				// patched, because half this watcher's state is about how long
 				// a flash that is ALREADY RUNNING has left — and that answer
 				// belongs to the settings it was armed under.
 				w = NewWatcher(set)
 				lastSettings = set
-				log.Printf("Beacon settings changed: flash %v, lobby flash %v, pauses %s",
-					set.FlashDuration, set.LobbyFlash, set.PauseSide)
+				log.Printf("Beacon settings changed: flash %v, lobby flash %v, pauses %s, poll every %v",
+					set.FlashDuration, set.LobbyFlash, set.PauseSide, set.PollInterval)
+			case set.PollInterval != lastSettings.PollInterval:
+				// Only the cadence moved. Nothing the watcher remembers depends
+				// on it, so the watcher is kept — a rebuild here would cut off a
+				// running flash and hand a spent one back. The wait below reads
+				// the new interval directly.
+				lastSettings = set
+				log.Printf("Poll interval changed: every %v", set.PollInterval)
 			}
 
 			pollCtx, cancel := context.WithTimeout(ctx, pollTimeout)
@@ -115,7 +129,7 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 
 		// A refused token is a standing condition, not a blip: back off rather
 		// than pointing a permanent stream of 401s at an internet-facing site.
-		timer := time.NewTimer(pollDelay(interval, status))
+		timer := time.NewTimer(pollDelay(set.PollInterval, status))
 		select {
 		case <-ctx.Done():
 			timer.Stop()

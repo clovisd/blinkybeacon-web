@@ -113,7 +113,7 @@ func main() {
 	// Always running: it reports itself "off" until a dashboard URL is set, and
 	// leaves the beacon alone while it is, so manual tray control still works.
 	watchCtx, stopWatch := context.WithCancel(context.Background())
-	go runWatchLoop(watchCtx, appState, &http.Client{Timeout: pollTimeout}, getCfg, pollInterval)
+	go runWatchLoop(watchCtx, appState, &http.Client{Timeout: pollTimeout}, getCfg, watcherSettings)
 
 	// Tray runs on the main goroutine and blocks until Quit.
 	quit := make(chan struct{})

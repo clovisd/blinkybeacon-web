@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -182,5 +184,112 @@ func TestConfig_validFlashSecondsBoundsTheRangeAtOneAndSixHundred(t *testing.T) 
 		if !validFlashSeconds(n) {
 			t.Errorf("validFlashSeconds(%d) = false, want true", n)
 		}
+	}
+}
+
+// ------------------------------------------------------- the poll interval
+
+// v070ConfigFile is a config file exactly as dashboard-v0.7.0 writes it: every
+// key that version knows, in its order and indentation, and no
+// poll_interval_ms — because that version had none. The light settings are
+// off their defaults so a test can see they survive the new key's defaulting.
+const v070ConfigFile = `{
+  "addr": "127.0.0.1",
+  "port": 1337,
+  "dashboard_url": "https://dashboard.example.com",
+  "line_number": 2,
+  "token": "test-bearer-token",
+  "flash_seconds": 20,
+  "lobby_flash": true,
+  "lobby_flash_seconds": 7,
+  "pause_side": "dire"
+}`
+
+func TestConfig_aV070FilePollsEveryTwoSecondsAsBefore(t *testing.T) {
+	// The upgrade promise again: a file written by the previous release has no
+	// poll_interval_ms, and must load as the two seconds that release polled at.
+	withTempConfig(t)
+	writeRawConfig(t, v070ConfigFile)
+
+	cfg := loadConfig()
+
+	if cfg.PollIntervalMs != 2000 {
+		t.Errorf("PollIntervalMs = %d, want 2000 — the cadence before the key existed", cfg.PollIntervalMs)
+	}
+	want := Config{
+		Addr: "127.0.0.1", Port: 1337, DashboardURL: "https://dashboard.example.com",
+		LineNumber: 2, APIToken: "test-bearer-token",
+		FlashSeconds: 20, LobbyFlash: true, LobbyFlashSeconds: 7, PauseSide: pauseSideDire,
+		PollIntervalMs: 2000,
+	}
+	if cfg != want {
+		t.Errorf("loaded %+v, want %+v", cfg, want)
+	}
+}
+
+func TestConfig_aFileWithKeysOmittedPollsEveryTwoSeconds(t *testing.T) {
+	withTempConfig(t)
+	writeRawConfig(t, `{"addr":"127.0.0.1","dashboard_url":"https://dashboard.example.com"}`)
+
+	if got := loadConfig().PollIntervalMs; got != 2000 {
+		t.Errorf("PollIntervalMs = %d, want the default 2000", got)
+	}
+}
+
+func TestConfig_readsAHandEditedPollInterval(t *testing.T) {
+	withTempConfig(t)
+	writeRawConfig(t, strings.Replace(v070ConfigFile, `"pause_side": "dire"`,
+		`"pause_side": "dire",
+  "poll_interval_ms": 750`, 1))
+
+	if got := loadConfig().PollIntervalMs; got != 750 {
+		t.Errorf("PollIntervalMs = %d, want the 750 typed into the file", got)
+	}
+}
+
+func TestConfig_keepsTheEndsOfThePollIntervalRange(t *testing.T) {
+	for _, ms := range []int{500, 10000} {
+		withTempConfig(t)
+		writeRawConfig(t, fmt.Sprintf(`{"poll_interval_ms":%d}`, ms))
+
+		if got := loadConfig().PollIntervalMs; got != ms {
+			t.Errorf("poll_interval_ms %d loaded as %d — the ends of the range are valid", ms, got)
+		}
+	}
+}
+
+func TestConfig_anOutOfRangePollIntervalLoadsAsTheDefault(t *testing.T) {
+	// Same rule as the flash durations: a hand-typed mistake starts the app at
+	// the documented default rather than stopping it — or, worse, hammering
+	// the dashboard at a cadence nobody meant.
+	for _, ms := range []int{0, -1, 1, 499, 10001, 600000} {
+		withTempConfig(t)
+		writeRawConfig(t, fmt.Sprintf(`{"poll_interval_ms":%d}`, ms))
+
+		if got := loadConfig().PollIntervalMs; got != defaultPollIntervalMs {
+			t.Errorf("poll_interval_ms %d loaded as %d, want the default %d", ms, got, defaultPollIntervalMs)
+		}
+	}
+}
+
+func TestConfig_validPollIntervalMsBoundsTheRangeAt500And10000(t *testing.T) {
+	for _, n := range []int{-1, 0, 499, 10001} {
+		if validPollIntervalMs(n) {
+			t.Errorf("validPollIntervalMs(%d) = true, want false", n)
+		}
+	}
+	for _, n := range []int{500, 2000, 10000} {
+		if !validPollIntervalMs(n) {
+			t.Errorf("validPollIntervalMs(%d) = false, want true", n)
+		}
+	}
+}
+
+func TestConfig_theDefaultPollIntervalIsTwoSeconds(t *testing.T) {
+	if defaultPollIntervalMs != 2000 {
+		t.Errorf("defaultPollIntervalMs = %d, want 2000", defaultPollIntervalMs)
+	}
+	if got := defaultConfig().PollIntervalMs; got != defaultPollIntervalMs {
+		t.Errorf("defaultConfig().PollIntervalMs = %d, want %d", got, defaultPollIntervalMs)
 	}
 }

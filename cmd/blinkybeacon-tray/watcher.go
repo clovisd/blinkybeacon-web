@@ -51,9 +51,6 @@ const (
 // during a pause, so a legitimately paused line is never graded as lost.
 const feedLostAfterSeconds = 30.0
 
-// pollInterval is how often the dashboard is asked for the current level.
-const pollInterval = 2 * time.Second
-
 // LineState is the dashboard's v0 line projection: GET /api/v0/lines/{n}, the
 // eight fields of the S79 design spec §4.1 plus draft_complete, appended last.
 //
@@ -269,17 +266,21 @@ type Watcher struct {
 
 // WatcherSettings is the operator's half of the watcher's behaviour — the three
 // v0.6.0 settings out of Config, resolved to the types the state machine
-// compares against. Passed in whole rather than read from the config file here,
-// so a watcher's behaviour is fixed at the moment it is built and cannot change
-// under it between two polls of the same match.
+// compares against, plus how often the loop polls. Passed in whole rather than
+// read from the config file here, so a watcher's behaviour is fixed at the
+// moment it is built and cannot change under it between two polls of the same
+// match.
 type WatcherSettings struct {
 	FlashDuration      time.Duration
 	LobbyFlash         bool
 	LobbyFlashDuration time.Duration
 	PauseSide          string
+	// PollInterval is the loop's, not Decide's: how long the loop waits after
+	// one poll returns before it starts the next.
+	PollInterval time.Duration
 }
 
-// watcherSettings reads the three settings out of a Config.
+// watcherSettings reads the watcher's settings out of a Config.
 //
 // It re-applies the same defaults loadConfig does, because a Config does not
 // only arrive from the config file: main.go's flags build one, and so does
@@ -291,6 +292,7 @@ func watcherSettings(cfg Config) WatcherSettings {
 		LobbyFlash:         cfg.LobbyFlash,
 		LobbyFlashDuration: time.Duration(cfg.LobbyFlashSeconds) * time.Second,
 		PauseSide:          cfg.PauseSide,
+		PollInterval:       time.Duration(cfg.PollIntervalMs) * time.Millisecond,
 	}
 	if !validFlashSeconds(cfg.FlashSeconds) {
 		s.FlashDuration = defaultFlashSeconds * time.Second
@@ -301,6 +303,17 @@ func watcherSettings(cfg Config) WatcherSettings {
 	if !validPauseSide(cfg.PauseSide) {
 		s.PauseSide = defaultPauseSide
 	}
+	if !validPollIntervalMs(cfg.PollIntervalMs) {
+		s.PollInterval = defaultPollIntervalMs * time.Millisecond
+	}
+	return s
+}
+
+// withoutPollInterval is the settings with the loop's cadence taken out:
+// everything Decide's answers depend on, and so everything a change to which
+// calls for a new watcher.
+func (s WatcherSettings) withoutPollInterval() WatcherSettings {
+	s.PollInterval = 0
 	return s
 }
 

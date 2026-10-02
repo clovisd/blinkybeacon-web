@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -385,8 +386,11 @@ func TestWatchLoop_recordsTheDashboardsNameForTheBoundLine(t *testing.T) {
 	cfg := Config{DashboardURL: srv.URL, LineNumber: 1, APIToken: testToken}
 	startWatchLoop(t, app, srv.Client(), func() Config { return cfg }, 5*time.Millisecond)
 
-	waitFor(t, "the watcher to learn the line's name", func() bool {
-		return app.WatchLabel() == "Line A"
+	// Both, not just the label: the loop records the label mid-tick and the
+	// status only at the end of it, so on the first tick the label can be
+	// there while the status still reads off.
+	waitFor(t, "the watcher to learn the line's name and report the feed", func() bool {
+		return app.WatchLabel() == "Line A" && app.WatchStatus() == WatchOK
 	})
 	if got := boundLineLabel(app.WatchStatus(), app.WatchLine(), app.WatchLabel()); got != "Bound: Line A" {
 		t.Errorf("the tray's bound row reads %q, want %q", got, "Bound: Line A")
@@ -739,5 +743,92 @@ func TestSettingsForm_apiDocsFollowTheSavedBindAddress(t *testing.T) {
 	}
 	if !strings.Contains(body, "http://127.0.0.1:1337") {
 		t.Errorf("API examples should fall back to 127.0.0.1 when bound to all interfaces")
+	}
+}
+
+// ----------------------------------------- what the form does not carry
+
+func TestSettingsPost_keepsAHandEditedPollInterval(t *testing.T) {
+	// poll_interval_ms is a config-file-only key: the form has no field for it.
+	// The POST builds its Config from the form, so unless the key is carried
+	// over from the file, every save — of anything — quietly puts the
+	// operator's hand edit back to the default.
+	withTempConfig(t)
+	srv := httptest.NewServer(newStubLineList(fourLines))
+	defer srv.Close()
+	writeRawConfig(t, strings.NewReplacer(
+		`"https://dashboard.example.com"`, `"`+srv.URL+`"`,
+		`"pause_side": "dire"`, `"pause_side": "dire",
+  "poll_interval_ms": 750`,
+	).Replace(v070ConfigFile))
+
+	h := &settingsHandler{client: srv.Client()}
+	saved := make(chan Config, 1)
+	h.onSave = func(c Config) { saved <- c }
+
+	form := beaconLightForm()
+	form.Set("dashboard_url", srv.URL)
+	form.Set("flash_seconds", "30") // the operator came to change something else
+	if w := submitSettings(t, h, form); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	if got := loadConfig().PollIntervalMs; got != 750 {
+		t.Errorf("PollIntervalMs = %d after a save, want the hand-edited 750", got)
+	}
+	select {
+	case c := <-saved:
+		if c.PollIntervalMs != 750 {
+			t.Errorf("the rebind carried PollIntervalMs %d, want 750", c.PollIntervalMs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("saving the form did not trigger the watcher rebind")
+	}
+}
+
+func TestSettingsPost_aFormFromAnEarlierProcessWithoutTheLightFieldsChangesNothing(t *testing.T) {
+	// Every form this process renders carries all four light fields, and a
+	// save restarts the server with a new handler and a new csrf token. So the
+	// only form that can arrive without them is one an earlier process served
+	// — a tab left open across an upgrade or a restart — and its token is one
+	// this process never minted. Refused, and the file is not touched.
+	withTempConfig(t)
+	writeRawConfig(t, v070ConfigFile)
+	path, err := configFilePath()
+	if err != nil {
+		t.Fatalf("configFilePath: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+
+	earlier := &settingsHandler{} // the process that served the stale tab
+	h := &settingsHandler{}
+	saved := make(chan Config, 1)
+	h.onSave = func(c Config) { saved <- c }
+
+	w := postSettings(t, h, url.Values{
+		"csrf":          {earlier.csrf()},
+		"addr":          {"127.0.0.1"},
+		"port":          {"1337"},
+		"dashboard_url": {"https://dashboard.example.com"},
+		"line_number":   {"2"},
+	})
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a form this process did not serve", w.Code)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the config file changed:\nbefore %s\nafter  %s", before, after)
+	}
+	select {
+	case c := <-saved:
+		t.Errorf("a refused form still rebound the watcher with %+v", c)
+	case <-time.After(50 * time.Millisecond):
 	}
 }

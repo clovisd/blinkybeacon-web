@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -142,11 +144,29 @@ func postSettings(t *testing.T, h *settingsHandler, form url.Values) *httptest.R
 // artefact: it is the same read the shipped loop does on every tick.
 func startWatchLoop(t *testing.T, app *AppState, client *http.Client, cfg func() Config, interval time.Duration) {
 	t.Helper()
+	startWatchLoopWith(t, app, client, cfg, pollEvery(interval))
+}
+
+// pollEvery is the settings every build uses, polling at interval instead of
+// the config's cadence: these tests run against a real socket, so they spend
+// real time, and half a second a poll is too slow to wait for.
+func pollEvery(interval time.Duration) func(Config) WatcherSettings {
+	return func(c Config) WatcherSettings {
+		s := watcherSettings(c)
+		s.PollInterval = interval
+		return s
+	}
+}
+
+// startWatchLoopWith is startWatchLoop for a test that needs to adjust more of
+// the watcher's settings than the cadence.
+func startWatchLoopWith(t *testing.T, app *AppState, client *http.Client, cfg func() Config, settings func(Config) WatcherSettings) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runWatchLoop(ctx, app, client, cfg, interval)
+		runWatchLoop(ctx, app, client, cfg, settings)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -221,6 +241,131 @@ func TestWatchLoop_flashesWhenTheLastPickLands(t *testing.T) {
 		return state == StateFlash
 	})
 }
+
+// v0Line is one poll's worth of the v0 projection in its real shape — every
+// key the dashboard publishes, pause_party included — for a live, unpaused
+// line 1 with the given match, game state and draft flag.
+func v0Line(matchID, gameState string, draftComplete bool) string {
+	return fmt.Sprintf(`{"v":0,"n":1,"label":"Line A","running":true,"match_id":%q,"game_state":%q,"paused":false,"seconds_since_gsi":0.6,"ts":1765500000,"draft_complete":%t,"pause_party":null}`,
+		matchID, gameState, draftComplete)
+}
+
+// sequenceDashboard answers poll i with payload i, and keeps answering with
+// the last one once the sequence runs out — one match told poll by poll.
+type sequenceDashboard struct {
+	mu    sync.Mutex
+	seq   []string
+	polls int
+}
+
+func (s *sequenceDashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	body := s.seq[min(s.polls, len(s.seq)-1)]
+	s.polls++
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(body))
+}
+
+func (s *sequenceDashboard) pollCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.polls
+}
+
+func TestWatchLoop_flashesOncePerMatchAndANewMatchReArmsIt(t *testing.T) {
+	// The once-per-match guard, through the real loop rather than at Decide.
+	// Each match is told poll by poll: picks outstanding, then all picks in for
+	// the rest of it — while the game state moves on out of hero selection,
+	// which is the second end-of-draft trigger and exactly what the guard is
+	// there to swallow.
+	//
+	// The flash is cut to a millisecond so it is over before the next poll,
+	// and the light is dark again by the time hero selection ends. A second
+	// arming is then a second Flash command on the beacon, not an invisible
+	// extension of a flash that is still running.
+	const (
+		heroSelection = "DOTA_GAMERULES_STATE_HERO_SELECTION"
+		strategyTime  = "DOTA_GAMERULES_STATE_STRATEGY_TIME"
+		inProgress    = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
+	)
+	match1 := []string{
+		v0Line("8000000001", heroSelection, false),
+		v0Line("8000000001", heroSelection, true), // the last pick: flash
+		v0Line("8000000001", heroSelection, true), // flash over, light dark
+		v0Line("8000000001", strategyTime, true),  // hero selection ends: same draft
+		v0Line("8000000001", inProgress, true),
+	}
+	match2 := []string{
+		v0Line("8000000002", heroSelection, false), // the next match
+		v0Line("8000000002", heroSelection, true),  // its last pick: flash again
+		v0Line("8000000002", heroSelection, true),
+		v0Line("8000000002", strategyTime, true),
+		v0Line("8000000002", inProgress, true),
+	}
+	dash := &sequenceDashboard{seq: append(append([]string{}, match1...), match2...)}
+
+	// Match 2's first poll is held until the test has counted match 1's
+	// flashes. The loop polls one at a time, so when that request arrives
+	// every poll of match 1 has been decided and applied.
+	reached, release := make(chan struct{}), make(chan struct{})
+	signalReached, releaseHeld := sync.OnceFunc(func() { close(reached) }), sync.OnceFunc(func() { close(release) })
+	gated := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if dash.pollCount() == len(match1) {
+			signalReached()
+			<-release
+		}
+		dash.ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(gated)
+	defer srv.Close()
+	defer releaseHeld()
+
+	app := NewAppState()
+	b := &flashCounter{}
+	app.SetBeacon(b)
+
+	cfg := defaultConfig()
+	cfg.DashboardURL, cfg.LineNumber, cfg.APIToken = srv.URL, 1, testToken
+	settings := func(c Config) WatcherSettings {
+		s := watcherSettings(c)
+		s.PollInterval = 5 * time.Millisecond
+		s.FlashDuration = time.Millisecond
+		return s
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runWatchLoop(ctx, app, srv.Client(), func() Config { return cfg }, settings)
+	}()
+	defer func() { cancel(); <-done }()
+
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for match 1 to be polled through")
+	}
+	if n := b.flashes.Load(); n != 1 {
+		t.Errorf("Flash called %d times over match 1, want 1", n)
+	}
+	releaseHeld()
+
+	waitFor(t, "match 2 to be polled through", func() bool { return dash.pollCount() > len(dash.seq)+2 })
+	if n := b.flashes.Load(); n != 2 {
+		t.Errorf("Flash called %d times over two matches, want 2 — one per match", n)
+	}
+}
+
+// flashCounter is a beacon whose Flash count can be read while the loop is
+// still driving it.
+type flashCounter struct{ flashes atomic.Int32 }
+
+func (b *flashCounter) Flash() error { b.flashes.Add(1); return nil }
+func (b *flashCounter) Spin() error  { return nil }
+func (b *flashCounter) Stop() error  { return nil }
+func (b *flashCounter) Close() error { return nil }
 
 func TestWatchLoop_flashesWhenHeroSelectionEndsOnAnUnreinstalledCfg(t *testing.T) {
 	// The fallback, end to end: a dashboard that sends no draft_complete at all
@@ -350,7 +495,7 @@ func TestWatchLoop_stopsWhenTheContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runWatchLoop(ctx, app, srv.Client(), func() Config { return cfg }, 5*time.Millisecond)
+		runWatchLoop(ctx, app, srv.Client(), func() Config { return cfg }, pollEvery(5*time.Millisecond))
 		close(done)
 	}()
 
