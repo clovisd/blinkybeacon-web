@@ -386,8 +386,11 @@ func TestWatchLoop_recordsTheDashboardsNameForTheBoundLine(t *testing.T) {
 	cfg := Config{DashboardURL: srv.URL, LineNumber: 1, APIToken: testToken}
 	startWatchLoop(t, app, srv.Client(), func() Config { return cfg }, 5*time.Millisecond)
 
-	waitFor(t, "the watcher to learn the line's name", func() bool {
-		return app.WatchLabel() == "Line A"
+	// Both, not just the label: the loop records the label mid-tick and the
+	// status only at the end of it, so on the first tick the label can be
+	// there while the status still reads off.
+	waitFor(t, "the watcher to learn the line's name and report the feed", func() bool {
+		return app.WatchLabel() == "Line A" && app.WatchStatus() == WatchOK
 	})
 	if got := boundLineLabel(app.WatchStatus(), app.WatchLine(), app.WatchLabel()); got != "Bound: Line A" {
 		t.Errorf("the tray's bound row reads %q, want %q", got, "Bound: Line A")
