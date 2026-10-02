@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -779,5 +780,52 @@ func TestSettingsPost_keepsAHandEditedPollInterval(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("saving the form did not trigger the watcher rebind")
+	}
+}
+
+func TestSettingsPost_aFormFromAnEarlierProcessWithoutTheLightFieldsChangesNothing(t *testing.T) {
+	// Every form this process renders carries all four light fields, and a
+	// save restarts the server with a new handler and a new csrf token. So the
+	// only form that can arrive without them is one an earlier process served
+	// — a tab left open across an upgrade or a restart — and its token is one
+	// this process never minted. Refused, and the file is not touched.
+	withTempConfig(t)
+	writeRawConfig(t, v070ConfigFile)
+	path, err := configFilePath()
+	if err != nil {
+		t.Fatalf("configFilePath: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+
+	earlier := &settingsHandler{} // the process that served the stale tab
+	h := &settingsHandler{}
+	saved := make(chan Config, 1)
+	h.onSave = func(c Config) { saved <- c }
+
+	w := postSettings(t, h, url.Values{
+		"csrf":          {earlier.csrf()},
+		"addr":          {"127.0.0.1"},
+		"port":          {"1337"},
+		"dashboard_url": {"https://dashboard.example.com"},
+		"line_number":   {"2"},
+	})
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a form this process did not serve", w.Code)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the config file changed:\nbefore %s\nafter  %s", before, after)
+	}
+	select {
+	case c := <-saved:
+		t.Errorf("a refused form still rebound the watcher with %+v", c)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
