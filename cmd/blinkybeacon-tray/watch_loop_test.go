@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -238,6 +239,96 @@ func TestWatchLoop_flashesWhenTheLastPickLands(t *testing.T) {
 		state, _, _ := app.Get()
 		return state == StateFlash
 	})
+}
+
+// v0Line is one poll's worth of the v0 projection in its real shape — every
+// key the dashboard publishes, pause_party included — for a live, unpaused
+// line 1 with the given match, game state and draft flag.
+func v0Line(matchID, gameState string, draftComplete bool) string {
+	return fmt.Sprintf(`{"v":0,"n":1,"label":"Line A","running":true,"match_id":%q,"game_state":%q,"paused":false,"seconds_since_gsi":0.6,"ts":1765500000,"draft_complete":%t,"pause_party":null}`,
+		matchID, gameState, draftComplete)
+}
+
+// sequenceDashboard answers poll i with payload i, and keeps answering with
+// the last one once the sequence runs out — one match told poll by poll.
+type sequenceDashboard struct {
+	mu    sync.Mutex
+	seq   []string
+	polls int
+}
+
+func (s *sequenceDashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	body := s.seq[min(s.polls, len(s.seq)-1)]
+	s.polls++
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(body))
+}
+
+func (s *sequenceDashboard) pollCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.polls
+}
+
+func TestWatchLoop_flashesOncePerMatchAndANewMatchReArmsIt(t *testing.T) {
+	// The once-per-match guard, through the real loop rather than at Decide.
+	// Each match is told poll by poll: picks outstanding, then all picks in for
+	// the rest of it — while the game state moves on out of hero selection,
+	// which is the second end-of-draft trigger and exactly what the guard is
+	// there to swallow.
+	//
+	// The flash is cut to a millisecond so it is over before the next poll,
+	// and the light is dark again by the time hero selection ends. A second
+	// arming is then a second Flash command on the beacon, not an invisible
+	// extension of a flash that is still running.
+	const (
+		heroSelection = "DOTA_GAMERULES_STATE_HERO_SELECTION"
+		strategyTime  = "DOTA_GAMERULES_STATE_STRATEGY_TIME"
+		inProgress    = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
+	)
+	dash := &sequenceDashboard{seq: []string{
+		v0Line("8000000001", heroSelection, false),
+		v0Line("8000000001", heroSelection, true), // the last pick: flash
+		v0Line("8000000001", heroSelection, true), // flash over, light dark
+		v0Line("8000000001", strategyTime, true),  // hero selection ends: same draft
+		v0Line("8000000001", inProgress, true),
+		v0Line("8000000002", heroSelection, false), // the next match
+		v0Line("8000000002", heroSelection, true),  // its last pick: flash again
+		v0Line("8000000002", heroSelection, true),
+		v0Line("8000000002", strategyTime, true),
+		v0Line("8000000002", inProgress, true),
+	}}
+	srv := httptest.NewServer(dash)
+	defer srv.Close()
+
+	app := NewAppState()
+	b := &countingBeacon{}
+	app.SetBeacon(b)
+
+	cfg := defaultConfig()
+	cfg.DashboardURL, cfg.LineNumber, cfg.APIToken = srv.URL, 1, testToken
+	settings := func(c Config) WatcherSettings {
+		s := watcherSettings(c)
+		s.PollInterval = 5 * time.Millisecond
+		s.FlashDuration = time.Millisecond
+		return s
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runWatchLoop(ctx, app, srv.Client(), func() Config { return cfg }, settings)
+	}()
+	waitFor(t, "both matches to be polled through", func() bool { return dash.pollCount() > len(dash.seq)+2 })
+	cancel()
+	<-done // the loop has stopped: the beacon's counters are ours to read
+
+	if b.flashes != 2 {
+		t.Errorf("Flash called %d times over two matches, want 2 — one per match", b.flashes)
+	}
 }
 
 func TestWatchLoop_flashesWhenHeroSelectionEndsOnAnUnreinstalledCfg(t *testing.T) {
