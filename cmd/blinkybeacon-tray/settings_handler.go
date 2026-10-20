@@ -261,9 +261,10 @@ func (h *settingsHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	// a value that IS there and is wrong is refused rather than quietly
 	// replaced with the default: the operator is watching this page, and
 	// telling them their 900 became 15 is the difference between a setting and
-	// a suggestion. An ABSENT field is not a mistake — it is a form that
-	// predates v0.6.0 — and lands on the documented default like everything
-	// else here.
+	// a suggestion. An ABSENT field never comes from this page: the form always
+	// carries it, and a tab an earlier process served was refused by its token
+	// above. A request that leaves one out anyway lands on the documented
+	// default like everything else here.
 	flashSeconds, err := formSeconds(r.FormValue("flash_seconds"), "flash_seconds", defaultFlashSeconds)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -402,11 +403,12 @@ func pauseSideOptions(saved string) string {
 
 // formSeconds reads one flash duration off the form.
 //
-// Blank or absent means "the default": the form always renders both of these
-// with a value, so a submit without one is not the operator's browser doing
-// normal work — it is something older, and the documented default is the
-// predictable place for it to land. Anything else out of range is refused, by
-// name, so the page can say which field it was.
+// Blank or absent means "the default". The form always renders both of these
+// with a value, so blank is an operator who cleared the box, and absent is not
+// this page at all: a tab an earlier process served is refused by its token
+// before it gets here, since every save mints a new one. Either way the
+// documented default is the predictable place to land. Anything else out of
+// range is refused, by name, so the page can say which field it was.
 func formSeconds(raw, field string, def int) (int, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
