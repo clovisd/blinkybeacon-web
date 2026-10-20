@@ -80,7 +80,7 @@ Copied from the design and the project rules; every task's requirements include 
 | # | Task | Builds | Seat | Size | Wave |
 |---|---|---|---|---|---|
 | T0 | Identity functions, both modes; the public-id rules | `identity.go`, `identity_test.go` | `cwd-implementer-opus5` | S | 0 |
-| T1 | Library: enumerate, open by path, `Info`, `LastAttemptOK`, `LocationID` | `pkg/fsbeacon/usbhid.go`, `pkg/fsbeacon/usbhid_darwin.go`, `pkg/fsbeacon/usbhid_test.go`, `.github/workflows/build.yml` | `cwd-implementer-opus5` | S | 0 |
+| T1 | Library: enumerate, open by path, `Info`, `LastAttemptOK`, `LocationID`; `Close` stops the keepalive worker before freeing the device | `pkg/fsbeacon/usbhid.go`, `pkg/fsbeacon/usbhid_darwin.go`, `pkg/fsbeacon/usbhid_test.go`, `.github/workflows/build.yml` | `cwd-implementer-opus5` | S | 0 |
 | T2 | Config: `BeaconRecord`, the `beacons` list, `beacon_seq`, migration, the mirror, loader forgiveness, `configStore` | `config.go`, `config_store.go`, `config_test.go`, `config_store_test.go` | `cwd-implementer-opus5` | M | 0 |
 | T3m | Mechanical: the settings tests move out of `watch_loop_test.go` | `watch_loop_test.go`, `settings_handler_test.go` | general-purpose, `model: "sonnet"` | S (moves only) | 0 |
 | T3 | The registry, the aggregate, the seam types, per-line watch state; `main.go` and `server.go` compat; the test-setup sweep | `beacons.go` (from `state.go`), `beacons_test.go` (from `state_test.go`), `devices.go`, `watcher.go`, `main.go`, `server.go`, `settings_handler.go` (tail of `handlePost` only), `watch_loop.go` and `tray.go` (compat lines), six test files' setup lines | `cwd-implementer-opus5` | L | 1 |
@@ -164,8 +164,9 @@ each line names the task that now pins it.
    forty-character accented name saves; a forty-one-rune one is refused. Pinned in T8
    (`TestSettingsPost_countsNameLengthInRunes`).
 3. **A `Retry-After` that is a date already past, or a number with a sign or a fraction** (`-5`,
-   `+5`, `1.5`). A past date or a negative number backs off nothing (0 s); `+5` and `1.5` are
-   unreadable and land on 10 s. Pinned in T4 (`TestRetryAfterDelay_sweep` and its table).
+   `+5`, `1.5`). A past date backs off nothing (0 s); a signed or fractional number is not what the
+   header grammar allows, so it is unreadable and lands on 10 s. Pinned in T4
+   (`TestRetryAfterDelay_pinnedValues` and the sweep).
 4. **Nine or more lights.** The ninth is driven, listed by HTTP and the settings page, and the tray's
    top row says `9 beacons (8 shown here)`; no slot is written twice. Pinned in T7
    (`TestSlots_aNinthBeaconIsCountedNotShown`).
@@ -412,13 +413,20 @@ probe's **real** path lines are added as fixtures in T0b, which is when they exi
 
 **Carries out:** §12 (the library change paragraph), §5.1 (`OpenPath` is the one the tray moves
 to), §14.2 (`Live()` reads an atomic the worker sets), red-team note 3 (`LastAttemptOK` starts
-`true` at open). `OpenFarmBeacon()` and the three 10-byte reports are untouched; `cmd/fsbeacon`
-keeps building.
+`true` at open), and one defect the plan review found in today's library: `Close` frees the HID
+device while the keepalive worker may still be running, and the worker's next write (up to 5 s
+later) uses freed memory. `Close` now stops the worker and waits for it first. `OpenFarmBeacon()`
+and the three 10-byte reports are untouched; `cmd/fsbeacon` keeps building.
+
+**Departs from the design's §12** (`OpenPath(path string)`): the plan's `OpenPath(info DeviceInfo)`
+takes the whole enumeration record, because the handle must remember what it was opened from
+(`Info()`: the path for the manager's bookkeeping, the serial and usage pair for the key) and a
+path alone cannot give that back.
 
 **Files:**
 - Modify: `pkg/fsbeacon/usbhid.go` (165 lines today)
 - Create: `pkg/fsbeacon/usbhid_darwin.go`
-- Modify: `pkg/fsbeacon/usbhid_test.go` (35 lines: one new test, one skip made robust)
+- Modify: `pkg/fsbeacon/usbhid_test.go` (35 lines: two new tests, one skip made robust)
 - Modify: `.github/workflows/build.yml:66-69` (the macOS arm64 test step also runs `./pkg/fsbeacon/`)
 
 **Interfaces:**
@@ -451,6 +459,26 @@ func (beacon *FarmBeacon) Info() DeviceInfo
 // beacon's mutex, so a caller can ask while the worker holds the lock.
 func (beacon *FarmBeacon) LastAttemptOK() bool
 
+// Close stops a running keepalive worker, waits for it to exit, and only
+// then closes the device, so no write can reach a device that has been
+// freed. The nudge is taken only by a worker that is listening; one already
+// on its way out (after a failed write) needs none, and the wait is the
+// mutex the worker holds for its whole life.
+func (beacon *FarmBeacon) Close() error
+
+// hidDevice is what the beacon needs of an open HID device: the methods
+// *hid.Device has, as an interface so the keepalive can be tested without a
+// light. On macOS LocationID asserts the concrete type.
+type hidDevice interface {
+	Write(p []byte) (int, error)
+	Close() error
+	Error() error
+}
+
+// keepaliveEvery is the worker's period: the five seconds the game itself
+// resends at. A var so a test can run the worker fast.
+var keepaliveEvery = 5 * time.Second
+
 // usbhid_darwin.go — LocationID is the IOKit location id of the open device:
 // the USB controller and port, the stable identity of a seat on a Mac.
 func (beacon *FarmBeacon) LocationID() (uint32, error)
@@ -473,6 +501,67 @@ func TestFarmBeacon_lastAttemptOKStartsTrue(t *testing.T) {
 		t.Errorf("Info().Path = %q, want the path it was opened from", b.Info().Path)
 	}
 }
+
+// fakeHID stands in for an open device: it counts writes and remembers
+// whether one arrived after Close, which is the write that would touch
+// freed memory on the real library.
+type fakeHID struct {
+	mu              sync.Mutex
+	writes          int
+	closed          bool
+	writeAfterClose bool
+}
+
+func (d *fakeHID) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		d.writeAfterClose = true
+		return 0, errors.New("write after close")
+	}
+	d.writes++
+	return len(p), nil
+}
+func (d *fakeHID) Close() error { d.mu.Lock(); defer d.mu.Unlock(); d.closed = true; return nil }
+func (d *fakeHID) Error() error { return errors.New("Success") } // what ready() reads as "fine"
+
+func (d *fakeHID) count() int { d.mu.Lock(); defer d.mu.Unlock(); return d.writes }
+
+func TestFarmBeacon_closeStopsTheKeepaliveBeforeClosingTheDevice(t *testing.T) {
+	keepaliveEvery = 2 * time.Millisecond
+	t.Cleanup(func() { keepaliveEvery = 5 * time.Second })
+	dev := &fakeHID{}
+	b := newFarmBeacon(dev, DeviceInfo{})
+	b.StartIdleWorker()
+	deadline := time.Now().Add(2 * time.Second)
+	for dev.count() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if dev.count() < 3 {
+		t.Fatal("the keepalive did not run")
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The worker has exited: Close held the mutex it lives under.
+	if b.stop != nil {
+		t.Error("a worker is still registered after Close")
+	}
+	time.Sleep(20 * keepaliveEvery)
+	dev.mu.Lock()
+	defer dev.mu.Unlock()
+	if dev.writeAfterClose {
+		t.Error("a write reached the device after Close")
+	}
+}
+
+func TestFarmBeacon_closeWithNoWorkerJustClosesTheDevice(t *testing.T) {
+	dev := &fakeHID{}
+	b := newFarmBeacon(dev, DeviceInfo{})
+	if err := b.Close(); err != nil || !dev.closed {
+		t.Errorf("Close with no worker: err %v, closed %v", err, dev.closed)
+	}
+}
 ```
 
   And make the existing hardware test skip on **any** open failure, not one message
@@ -483,8 +572,11 @@ func TestFarmBeacon_lastAttemptOKStartsTrue(t *testing.T) {
 
 - [ ] **Step 2: Run red** where it can run: on this box the package does not compile (`libudev.h`
   missing), so the red run is `GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc go vet ./pkg/fsbeacon/`
-  failing with `undefined: newFarmBeacon`. **Disarm:** once implemented, delete the
-  `lastAttemptOK.Store(true)` line in `newFarmBeacon`; the test must fail on the macOS CI leg.
+  failing with `undefined: newFarmBeacon`. **Disarms:** once implemented, delete the
+  `lastAttemptOK.Store(true)` line in `newFarmBeacon`; the first test must fail on the macOS CI
+  leg. Delete the `select` send and the `Lock`/`Unlock` pair from `Close`; the close test must
+  fail there on `writeAfterClose` (the worker runs every 2 ms in that test, so the freed-device
+  write is immediate, not five seconds away).
 
 - [ ] **Step 3: Implement.** In `usbhid.go`:
 
@@ -502,7 +594,7 @@ type DeviceInfo = hid.DeviceInfo
 type FarmBeacon struct {
 	sync.Mutex
 	stop      chan bool
-	hidDevice *hid.Device
+	hidDevice hidDevice
 	info      DeviceInfo
 	// lastAttemptOK is the result of the keepalive's most recent write. An
 	// atomic so it can be read while the worker holds the mutex above.
@@ -510,7 +602,7 @@ type FarmBeacon struct {
 	OnError       func()
 }
 
-func newFarmBeacon(dev *hid.Device, info DeviceInfo) *FarmBeacon {
+func newFarmBeacon(dev hidDevice, info DeviceInfo) *FarmBeacon {
 	b := &FarmBeacon{hidDevice: dev, info: info}
 	b.lastAttemptOK.Store(true)
 	return b
@@ -554,8 +646,9 @@ func (beacon *FarmBeacon) Info() DeviceInfo   { return beacon.info }
 func (beacon *FarmBeacon) LastAttemptOK() bool { return beacon.lastAttemptOK.Load() }
 ```
 
-  In `worker`, record every write's result and keep the flow as it is (the initial write is still
-  not acted on; the ticker's failure still calls `OnError` and returns):
+  In `worker`, the ticker is `time.NewTicker(keepaliveEvery)`; record every write's result and
+  keep the flow as it is (the initial write is still not acted on; the ticker's failure still
+  calls `OnError` and returns):
 
 ```go
 	// Set the initial device state
@@ -574,16 +667,41 @@ func (beacon *FarmBeacon) LastAttemptOK() bool { return beacon.lastAttemptOK.Loa
 			beacon.lastAttemptOK.Store(true)
 ```
 
+  `Close` replaces today's one-liner (`usbhid.go:93-95`):
+
+```go
+func (beacon *FarmBeacon) Close() error {
+	// A worker sitting in its select takes the nudge and returns; a worker
+	// already returning (its write failed, OnError ran) is not listening and
+	// the default branch is taken. Either way it holds the mutex until it
+	// has exited, so taking the mutex is the wait. A nil stop channel means
+	// no worker: the send case is never ready and the lock is free.
+	select {
+	case beacon.stop <- false:
+	default:
+	}
+	beacon.Lock()
+	beacon.Unlock()
+	return beacon.hidDevice.Close()
+}
+```
+
+  This also makes today's single-beacon paths safe: `OnQuit` (`main.go:169-170`) calls `Stop()`,
+  which starts a fresh worker, and then `Close()`, which freed the device under that worker; and a
+  close after a failed command, where a worker may still be between ticks, no longer races it.
+
   `usbhid_darwin.go` (`//go:build darwin`):
 
 ```go
 package fsbeacon
 
+import hid "github.com/sstallion/go-hid"
+
 // LocationID is the IOKit location id of the open device: the USB controller
 // and port path, which is the same every time a light is plugged into that
 // port and is the identity of a seat on a Mac.
 func (beacon *FarmBeacon) LocationID() (uint32, error) {
-	return beacon.hidDevice.GetLocationID()
+	return beacon.hidDevice.(*hid.Device).GetLocationID()
 }
 ```
 
@@ -594,22 +712,25 @@ func (beacon *FarmBeacon) LocationID() (uint32, error) {
   `GOOS=darwin CGO_ENABLED=0 go vet ./pkg/fsbeacon/` is **not** meaningful (cgo off drops the
   package), so the darwin file is checked by the `build` workflow's macOS legs on the pushed
   branch: both green, and the arm64 leg's log shows `ok  …/pkg/fsbeacon` with the hardware test
-  `SKIP`. The tray suite on Linux unchanged (`ok`). `go build ./cmd/fsbeacon/` under
+  `SKIP` and the two unit tests `PASS` under `-race`. The tray suite on Linux unchanged (`ok`). `go build ./cmd/fsbeacon/` under
   `GOOS=windows` still builds (the CLI uses `OpenFarmBeacon`).
 
-- [ ] **Step 5: Commit** `feat(fsbeacon): enumerate beacons and open one by path; a handle keeps its DeviceInfo and reports its last keepalive result`
+- [ ] **Step 5: Commit** in two: `fix(fsbeacon): Close stops the keepalive worker and waits for it before freeing the device` and `feat(fsbeacon): enumerate beacons and open one by path; a handle keeps its DeviceInfo and reports its last keepalive result`
 
 **Acceptance:**
-- `OpenFarmBeacon`, `Flash`, `Spin`, `Stop`, `Close`, `StartIdleWorker` and the three report byte
-  strings are byte-for-byte unchanged (`git diff` shows no hunk in them beyond the constructor
-  call).
+- `OpenFarmBeacon`, `Flash`, `Spin`, `Stop`, `StartIdleWorker` and the three report byte strings
+  are unchanged apart from the constructor call and the ticker reading `keepaliveEvery`
+  (`git diff` shows no other hunk in them).
+- `Close` stops a running worker and waits for it before closing the device; with no worker it
+  only closes the device; it is never called from inside `OnError` (the manager's rule, T5a).
 - `LastAttemptOK()` is true at open and false after a failed ticker write; the worker's exit path
   is unchanged.
 - The hardware test skips on any open failure with the error in the skip message.
 - CI: macOS arm64 runs the library's tests; all three build legs green.
 
-**Size:** S (about 60 lines of code, 15 of test, 1 of workflow). **Seat:** `cwd-implementer-opus5`:
-a third-party API surface.
+**Size:** S (about 90 lines of code, 70 of test, 1 of workflow). **Seat:** `cwd-implementer-opus5`:
+a third-party API surface, and a close path a mistake in which frees memory under a running
+goroutine.
 
 **Plan gate:** rule 1: n/a. Rule 2 (payload): the three HID reports are the unchanged 10-byte
 constants `fs22MagicFlash/Spin/Stop`; this task adds no write. Rule 3: n/a (no parser). Rule 4:
@@ -1193,6 +1314,10 @@ file move from a complete brief.
 
 ## T3 — The registry, the aggregate, the seam types, per-line watch state; `main.go` and `server.go` compat; the test-setup sweep
 
+**Departs from the design's §11.1** in one name: the S14 hook is `AnyConnectedFollowsALine()`,
+not `anyConnectedBeaconFollowsALine()`, exported-case like the registry's other reads and without
+the word the receiver already says; same meaning. T7 says how it reaches the icon.
+
 **Carries out:** §6 (the model's live half), §7.3 (`wanted`'s inputs: identify deadline, hand
 state), §9.2 (the aggregate: connected = any, state = rank maximum over connected beacons), §10.2
 step 2 (an unmatched record binds to the first light no record claims), §10.3 (a record survives
@@ -1208,9 +1333,10 @@ beacon with a registry and keeps the type's name so the fifty-odd call sites cha
   the four tests become registry tests, the one expectation change §14.2 allows)
 - Create: `cmd/blinkybeacon-tray/devices.go` (the seam: three types, no build tag)
 - Modify: `cmd/blinkybeacon-tray/watcher.go:548-573` (`applyState` moves to `beacons.go`, per beacon;
-  and two declarations T4 gives behaviour to, so wave 2's tasks can all name them:
-  `const WatchThrottled WatchStatus = "throttled"` beside the others at `:95-109`, and
-  `RetryInSeconds int` on `WatchDetail` at `:114-117`)
+  and three things T4's loop gives behaviour to, so wave 2's tasks can all name them:
+  `const WatchThrottled WatchStatus = "throttled"` beside the others at `:95-109`,
+  `RetryInSeconds int` on `WatchDetail` at `:114-117`, and `watchStatusLabel`'s case for it at
+  `:601-629`: `fmt.Sprintf("▲ Dashboard: slowed by the dashboard (line %d, retry in %ds)", line, d.RetryInSeconds)`)
 - Modify: `cmd/blinkybeacon-tray/main.go` (the store, the registry, the callbacks; the single-beacon
   goroutine removed; `fsbeacon` import dropped — `beacon_check.go` keeps the package imported)
 - Modify: `cmd/blinkybeacon-tray/server.go:22-47` (`NewHTTPServer(app, addr, port)`; the handlers
@@ -1312,6 +1438,10 @@ type AppState struct {
 	// wake is nudged when something wants the loop to re-apply now (Identify's
 	// end); buffered one deep, never blocks.
 	wake chan struct{}
+	// saves counts the one kind of save that runs in its own goroutine
+	// (syncConfig's absorb, which may be inside the store's onChange), so a
+	// test can wait for it before its temp config dir goes away.
+	saves sync.WaitGroup
 }
 
 func NewAppState(store *configStore) *AppState // store may be nil
@@ -1323,8 +1453,12 @@ func NewAppState(store *configStore) *AppState // store may be nil
 // (tombstoned; a handle they still held moves to a fresh in-memory entry),
 // and every unmatched configured record (key "") absorbs the first in-memory
 // entry in order of appearance: its handle, key, state, hand and identify
-// deadline. seq is raised to cfg.BeaconSeq. The absorbing binds are saved
-// through updateConfig in their own goroutine.
+// deadline. A configured record is unmatched when its entry's key is empty
+// after the merge: a key the entry already holds (from a bind whose save has
+// not landed yet) counts, a key only the config lacks does not unmatch it.
+// seq is raised to cfg.BeaconSeq. An absorbing bind is saved through
+// updateConfig in a goroutine the registry tracks (saves), because syncConfig
+// may be running inside the store's own onChange.
 func (a *AppState) syncConfig(cfg Config)
 // updateConfig is the one way anything in the tray writes the file: it runs
 // fn through the store, then stamps BeaconSeq with the live counter so an id
@@ -1339,17 +1473,20 @@ func (a *AppState) heldBy(key string) deviceHandle
 // bind gives a newly opened light to the registry: the entry with its key if
 // one is unplugged, else the first unmatched configured entry (which takes
 // the key and is saved), else a fresh in-memory entry with the next public
-// id. A fresh handle shows idle. Returns the public id. It is an error to
-// bind a key whose entry already holds a handle: callers decide live/replug
-// first and call rebind.
+// id. A fresh handle shows idle. Returns the public id. The save of a newly
+// taken key runs synchronously, after a.mu is released, before bind returns.
+// It is an error to bind a key whose entry already holds a handle: callers
+// decide live/replug first and call rebind.
 func (a *AppState) bind(h deviceHandle) (id string, err error)
 // rebind replaces the handle of the entry with h.Key(): the old handle is
 // returned for the caller to close; state is reset to idle so the next tick
 // re-applies the wanted state (a replug mid-pause resumes spinning).
 func (a *AppState) rebind(h deviceHandle) (old deviceHandle, id string, err error)
 // dropHandle marks the entry that holds exactly h unplugged (handle nil,
-// state and hand idle) and hands h to onDrop. A handle no entry holds is
-// ignored and false is returned: the identity check of §12 item 2.
+// state and hand idle) and hands h to onDrop. A configured entry stays,
+// listed as unplugged (§10.3); an in-memory entry is removed, since a light
+// that was never saved leaves no record behind (§10.4). A handle no entry
+// holds is ignored and false is returned: the identity check of §12 item 2.
 func (a *AppState) dropHandle(h deviceHandle) bool
 // markSameIdentity records that a second light with key was refused at this
 // enumerate (true) or that none was (false).
@@ -1581,6 +1718,9 @@ func newTestAppNoTemp(t *testing.T) *AppState {
 	app := NewAppState(store)
 	store.onChange = func(_, new Config) { app.syncConfig(new) }
 	app.syncConfig(store.Get())
+	// Registered after withTempConfig's cleanup, so it runs before it: no
+	// save of this registry's is still in flight when configDir is restored.
+	t.Cleanup(app.saves.Wait)
 	return app
 }
 ```
@@ -1600,21 +1740,28 @@ func TestRegistry_startsEmptyAndDisconnected(t *testing.T) {
 }
 
 func TestRegistry_droppingTheOnlyHandleClearsToIdle(t *testing.T) {
-	app := NewAppState(nil)
+	// A configured beacon keeps its record, unplugged and idle; an in-memory
+	// one vanishes. Both leave the aggregate idle and disconnected.
+	app := newTestApp(t) // b1 configured, unmatched
 	b := &countingBeacon{}
-	id := plant(app, b)
+	id := plant(app, b) // takes b1
 	if err := app.Command(id, StateSpin); err != nil {
 		t.Fatal(err)
 	}
 	if !app.dropHandle(viewHandle(app, id)) {
 		t.Fatal("dropHandle returned false for the handle the entry holds")
 	}
-	v, _ := app.View(id)
-	if v.Connected || v.State != StateIdle {
-		t.Errorf("after the drop: %+v, want unplugged and idle", v)
+	v, ok := app.View(id)
+	if !ok || v.Connected || v.State != StateIdle {
+		t.Errorf("after the drop: %+v (listed %v), want listed, unplugged and idle", v, ok)
 	}
 	if sv, connected := app.Aggregate(); sv != StateIdle || connected {
 		t.Errorf("Aggregate() = %v,%v, want idle,false", sv, connected)
+	}
+	spare := plant(app, &countingBeacon{}) // in-memory
+	app.dropHandle(viewHandle(app, spare))
+	if _, ok := app.View(spare); ok {
+		t.Error("an unplugged in-memory beacon must vanish")
 	}
 }
 
@@ -1736,7 +1883,9 @@ func TestRegistry_aFirstSeenLightIsAnInMemoryBeaconFollowingNothing(t *testing.T
 	if v.Key != "port:p"+fmt.Sprint(plantSeq) || v.InMemory || !reflect.DeepEqual(v.Lines, []int{1}) {
 		t.Errorf("b1 after bind = %+v, want keyed, configured, following line 1", v)
 	}
-	waitFor(t, "the bind to be saved", func() bool { return app.store.Get().Beacons[0].Key == v.Key })
+	if app.store.Get().Beacons[0].Key != v.Key {
+		t.Error("the bind was not saved before bind returned")
+	}
 	second := plant(app, &countingBeacon{})
 	w, _ := app.View(second)
 	if second != "b2" || !w.InMemory || len(w.Lines) != 0 || w.Name != "" || w.Light.FlashSeconds != defaultFlashSeconds {
@@ -1882,6 +2031,33 @@ func TestRegistry_promoteWritesTheInMemoryRecord(t *testing.T) {
 	}
 }
 
+func TestRegistry_syncAbsorbsAnInMemoryLightIntoAnUnmatchedRecordAndSavesIt(t *testing.T) {
+	// The one save that runs in its own goroutine: an unmatched record
+	// appearing through the store while a light nobody claims is plugged in.
+	// Under -race, a registry that did not track this goroutine would let it
+	// read configDir after the next test's withTempConfig has replaced it —
+	// this test, run beside any other, is what catches that leak.
+	app := newTestApp(t)
+	plant(app, &countingBeacon{}) // b1
+	spare := plant(app, &countingBeacon{}) // in-memory b2
+	app.updateConfig(func(c *Config) error {
+		c.Beacons = append(c.Beacons, BeaconRecord{ID: "b3", Key: "", Name: "Shelf", Lines: []int{2}, FlashSeconds: 15, LobbyFlashSeconds: 10, PauseSide: pauseSideBoth})
+		c.BeaconSeq = 3
+		return nil
+	})
+	app.saves.Wait()
+	v, ok := app.View("b3")
+	if !ok || !v.Connected || v.Key == "" {
+		t.Fatalf("b3 did not absorb the spare light: %+v", v)
+	}
+	if _, ok := app.View(spare); ok {
+		t.Error("the absorbed in-memory entry survived")
+	}
+	if got := app.store.Get().Beacons[2].Key; got != v.Key {
+		t.Errorf("the absorb was not saved: file key %q, entry key %q", got, v.Key)
+	}
+}
+
 func TestRegistry_dropHandleIgnoresAHandleNoEntryHolds(t *testing.T) {
 	app := NewAppState(nil)
 	var dropped []deviceHandle
@@ -1941,7 +2117,7 @@ func TestRegistry_rebindResetsToIdleAndReturnsTheOldHandle(t *testing.T) {
 }
 
 func TestRegistry_identifyFlashesNowAndNudgesTheLoop(t *testing.T) {
-	app := NewAppState(nil)
+	app := newTestApp(t) // b1 configured, so it stays listed once unplugged
 	b := &countingBeacon{}
 	id := plant(app, b)
 	now := time.Now()
@@ -2030,8 +2206,12 @@ func TestRegistry_linesAndTheS14Hook(t *testing.T) {
   `theLiveCounterIsReserved…` red; `Resolve` matching names case-insensitively → red.
 
 - [ ] **Step 4: Implement `beacons.go` and `devices.go`.** Rules the code keeps:
-  - Every hook (`onDrop`, the bind-save) is called after `a.mu` is released; the bind-save runs as
-    `go a.updateConfig(...)` and logs its error (`log.Printf("could not save beacon %s's key: %v", …)`).
+  - Every hook (`onDrop`) is called after `a.mu` is released. A bind-save runs **synchronously**
+    after `a.mu` is released and before `bind` returns, logging its error
+    (`log.Printf("could not save beacon %s's key: %v", …)`). The one save that cannot be
+    synchronous — `syncConfig`'s absorb, which may be running inside the store's `onChange` under
+    the store's lock — runs as `a.saves.Add(1); go func() { defer a.saves.Done(); … }()`, and
+    nothing else in the registry starts a goroutine that touches the file.
   - `syncConfig` runs under `a.mu` and never calls the store; `updateConfig` never holds `a.mu`
     while calling the store (it reads `a.seq` under the lock, releases, then calls `store.Update`
     with a wrapper that runs `fn` and then sets `c.BeaconSeq = max(c.BeaconSeq, seq)`).
@@ -2131,9 +2311,9 @@ flash — pinned), and the `throttled` word everywhere the design names it (§8.
 
 **Files:**
 - Modify: `cmd/blinkybeacon-tray/watch_loop.go` (140 lines; rewritten around the tick)
-- Modify: `cmd/blinkybeacon-tray/watcher.go` (`WatchThrottled`, `WatchDetail.RetryInSeconds`,
-  `pollError.RetryAfter`, `pollFailureStatus`, `retryAfterDelay`, `beaconWatcherSettings`,
-  `watchStatusLabel`'s new case)
+- Modify: `cmd/blinkybeacon-tray/watcher.go` (`pollError.RetryAfter`, `pollFailureStatus`,
+  `retryAfterDelay`, `beaconWatcherSettings`; `WatchThrottled`, `WatchDetail.RetryInSeconds` and
+  `watchStatusLabel`'s throttled case are T3's and only get exercised here)
 - Modify: `cmd/blinkybeacon-tray/lines.go:104-113` (`getJSON` keeps the `Retry-After` header on the error)
 - Create: `cmd/blinkybeacon-tray/combine.go`, `cmd/blinkybeacon-tray/combine_test.go`
 - Modify: `cmd/blinkybeacon-tray/watch_loop_test.go`, `watch_loop_cadence_test.go`, `watcher_test.go`
@@ -2172,9 +2352,9 @@ const (
 
 // retryAfterDelay reads a Retry-After header: a whole number of seconds, or
 // an HTTP date (RFC 7231 §7.1.1.1: IMF-fixdate, RFC 850, asctime — what
-// http.ParseTime accepts). A past date or a negative number is 0; anything
-// unreadable, "+5" and "1.5" included, is throttleDefault; the result is
-// capped at throttleCap.
+// http.ParseTime accepts). A past date is 0; a number is digits only, so a
+// sign ("-5", "+5"), a fraction ("1.5") or any other text is unreadable and
+// lands on throttleDefault; the result is capped at throttleCap.
 func retryAfterDelay(header string, now time.Time) time.Duration
 
 // beaconWatcherSettings is one beacon's WatcherSettings: its four light
@@ -2207,8 +2387,9 @@ type linePair struct {
 }
 
 type lineResult struct {
-	ls  *LineState
-	err error
+	ls    *LineState
+	err   error
+	fresh bool // the dashboard was asked this tick; false for a line still waiting out a 429
 }
 
 func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg func() Config, settings func(Config, BeaconRecord) WatcherSettings) {
@@ -2261,7 +2442,9 @@ func runWatchLoop(ctx context.Context, app *AppState, client *http.Client, cfg f
 				if r.err != nil {
 					status = pollFailureStatus(r.err)
 					var pe *pollError
-					if status == WatchThrottled && errors.As(r.err, &pe) {
+					if status == WatchThrottled && r.fresh && errors.As(r.err, &pe) {
+						// Only a 429 from the wire re-arms the wait; a line still
+						// waiting one out reports its wait and nothing more.
 						throttled[l] = now.Add(retryAfterDelay(pe.RetryAfter, now))
 					}
 					if status == WatchThrottled {
@@ -2379,7 +2562,7 @@ func fetchLines(ctx context.Context, client *http.Client, c Config, lines []int,
 			ls, err := fetchLineState(pollCtx, client, c.DashboardURL, l, c.APIToken)
 			cancel()
 			mu.Lock()
-			results[l] = lineResult{ls: ls, err: err}
+			results[l] = lineResult{ls: ls, err: err, fresh: true}
 			mu.Unlock()
 		}(l)
 	}
@@ -2388,10 +2571,8 @@ func fetchLines(ctx context.Context, client *http.Client, c Config, lines []int,
 }
 ```
 
-  (`v.Hand` is T3's. A still-throttled line's synthetic
-  `pollError` has an empty `RetryAfter` and is **not** used to re-arm `throttled[l]`: only a fresh
-  429 from the wire does, which is why the loop checks `errors.As` on a result that came from a
-  fetch; the implementer keeps a `fresh bool` on `lineResult` to tell them apart.)
+  (`v.Hand` is T3's. A still-throttled line's synthetic `pollError` is not `fresh`, so it never
+  re-arms `throttled[l]`: the gate is in the block above.)
 
 - [ ] **Step 1: Write the failing tests.** `combine_test.go`:
 
@@ -2547,8 +2728,8 @@ func TestRetryAfterDelay_pinnedValues(t *testing.T) {
 		"12":                                  12 * time.Second,
 		"120":                                 throttleCap,
 		"0":                                   0,
-		"-5":                                  0,
-		"+5":                                  throttleDefault, // not a Retry-After number
+		"-5":                                  throttleDefault, // a sign is not a Retry-After number: unreadable, the default
+		"+5":                                  throttleDefault,
 		"1.5":                                 throttleDefault,
 		"soon":                                throttleDefault,
 		now.Add(20 * time.Second).UTC().Format(http.TimeFormat): 20 * time.Second,
@@ -2565,8 +2746,9 @@ func TestRetryAfterDelay_pinnedValues(t *testing.T) {
 
 func TestRetryAfterDelay_sweep(t *testing.T) {
 	// Exact arithmetic over the whole range a header can name, well past the
-	// pinned 12, 120 and the two bounds: the result is always
-	// min(max(n, 0), cap) for a number and the same for a date's distance.
+	// pinned 12, 120 and the two bounds: the result is always min(n, cap) for
+	// a number (n ≥ 0; a signed one is unreadable, pinned above) and
+	// min(max(distance, 0), cap) for a date.
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	clamp := func(d time.Duration) time.Duration {
 		if d < 0 {
@@ -2577,7 +2759,7 @@ func TestRetryAfterDelay_sweep(t *testing.T) {
 		}
 		return d
 	}
-	for n := -100; n <= 100_000; n += 7 {
+	for n := 0; n <= 100_000; n += 7 {
 		want := clamp(time.Duration(n) * time.Second)
 		if got := retryAfterDelay(strconv.Itoa(n), now); got != want {
 			t.Fatalf("retryAfterDelay(%d) = %v, want %v", n, got, want)
@@ -2585,6 +2767,10 @@ func TestRetryAfterDelay_sweep(t *testing.T) {
 		at := now.Add(time.Duration(n) * time.Second)
 		if got := retryAfterDelay(at.UTC().Format(http.TimeFormat), now); got != want {
 			t.Fatalf("retryAfterDelay(date %+ds) = %v, want %v", n, got, want)
+		}
+		past := now.Add(-time.Duration(n+1) * time.Second)
+		if got := retryAfterDelay(past.UTC().Format(http.TimeFormat), now); got != 0 {
+			t.Fatalf("retryAfterDelay(date -%ds) = %v, want 0", n+1, got)
 		}
 	}
 	if retryAfterDelay("9999999999999999999999", now) != throttleDefault {
@@ -2637,6 +2823,7 @@ type linesDashboard struct {
 func newLinesDashboard() *linesDashboard
 func (d *linesDashboard) set(line int, status int, body string)             // answer this from now on
 func (d *linesDashboard) throttle(line int, retryAfter string)              // 429 with that header from now on
+func (d *linesDashboard) throttleOnce(line int, retryAfter string)          // 429 with that header once, then the line's set answer
 func (d *linesDashboard) polls(line int) int
 func (d *linesDashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) // parses the trailing number; unknown line → 404 {"error":"no such line"}
 
@@ -2887,15 +3074,34 @@ func TestWatchLoop_a429BacksOffThatLineOnlyAndHonoursRetryAfter(t *testing.T) {
 		app.syncConfig(cfg)
 		plantKeyed(app, "port:p-left", &countingBeacon{})
 		plantKeyed(app, "port:p-right", &countingBeacon{})
-		dash.throttle(1, "12")
+		dash.throttleOnce(1, "12")
 		runLoopFor(t, app, dash, cfg, 20*time.Second)
-		// Line 1: asked at t=0 (the 429), then not again until t=12: 1 + (20-12)/2 = 5 polls.
+		// Line 1: asked at t=0 (the one 429), not again until t=12 (now 200),
+		// then every 2 s: t=12,14,16,18 and perhaps 20 → 5 or 6 polls.
 		// Line 2: every 2 s for 20 s: 10 or 11 polls.
-		if p := dash.polls(1); p < 4 || p > 6 {
-			t.Errorf("throttled line polled %d times in 20 s, want about 5", p)
+		if p := dash.polls(1); p < 5 || p > 6 {
+			t.Errorf("throttled line polled %d times in 20 s, want 5 or 6", p)
 		}
 		if p := dash.polls(2); p < 10 {
 			t.Errorf("the other line polled %d times in 20 s, want its full cadence (10)", p)
+		}
+	})
+}
+
+func TestWatchLoop_aLineStillAnswering429ReArmsItsWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dash := newLinesDashboard()
+		dash.set(1, 200, livePayload)
+		app := NewAppState(nil)
+		cfg := boundConfig()
+		cfg.PollIntervalMs = 2000
+		app.syncConfig(cfg)
+		plantKeyed(app, "port:p1", &countingBeacon{})
+		dash.throttle(1, "12") // every answer is a 429
+		runLoopFor(t, app, dash, cfg, 20*time.Second)
+		// Asked at t=0 (429, wait 12), at t=12 (429 again, wait until 24): 2 polls in 20 s.
+		if p := dash.polls(1); p != 2 {
+			t.Errorf("a line that keeps answering 429 was polled %d times in 20 s, want 2", p)
 		}
 	})
 }
@@ -2995,16 +3201,17 @@ func TestWatchLoop_identifyEndsWithinTwoSecondsAtASlowCadence(t *testing.T) {
 - [ ] **Step 2: Run red.** Compile errors (`combine`, `WatchThrottled`, `beaconWatcherSettings`,
   the hook type). **Disarms** once implemented: `combine` returning the first answer →
   `theTenRows…` red on row 6; `fetchLines` fetching per pair instead of per line →
-  `fetchesEachDistinctLineOnce` red; `throttled[l]` re-armed from the synthetic error → the 429
-  test polls line 1 only once in 20 s (red: "about 5"); dropping the `Wake` case from the select
+  `fetchesEachDistinctLineOnce` red; `throttled[l]` re-armed from the synthetic error (the `fresh` gate dropped) → the
+  `throttleOnce` test polls line 1 once in 20 s (red: "want 5 or 6"), and the re-arm pin stays
+  green — which is why both tests exist; dropping the `Wake` case from the select
   → `identifyEnds…` red; `releaseToHand` leaving `hand` untouched → `handsEveryDrivenBeaconBack…`
   red (`left.stops` ≠ 1 is not it — the loop would re-spin it: state `spin` with `spins` 2).
 
 - [ ] **Step 3: Implement** per the Interfaces block and the tick above. `getJSON` adds
   `RetryAfter: resp.Header.Get("Retry-After")` to the `pollError` it builds (`lines.go:109-112`).
-  `retryAfterDelay`: `strings.TrimSpace`; `""` → default; all digits (an optional leading `-`
-  allowed, nothing else) → `strconv.Atoi`, error → default; else `http.ParseTime` (error →
-  default) and `t.Sub(now)`; clamp to `[0, throttleCap]`.
+  `retryAfterDelay`: `strings.TrimSpace`; `""` → default; all digits, nothing else → `strconv.Atoi`,
+  error → default; else `http.ParseTime` (error → default) and `t.Sub(now)`; clamp to
+  `[0, throttleCap]`.
 
 - [ ] **Step 4: The helper changes.** `pollEvery` returns `func(Config, BeaconRecord) WatcherSettings`;
   `startWatchLoopWith`'s parameter type follows; the two closures at `watch_loop_test.go:155,331`
@@ -3025,19 +3232,20 @@ func TestWatchLoop_identifyEndsWithinTwoSecondsAtASlowCadence(t *testing.T) {
 - The ten rows and the 3¹…3⁶ sweep (1,092 combinations, each also checked reversed, idempotent and
   monotone) pass; row 7's resume is pinned on one pair.
 - A tick makes one request per distinct line; a 429 waits per line for `Retry-After` clamped to
-  [0, 30 s], 10 s when absent; a 401 backs off the whole loop; 404 and 5xx keep today's behaviour.
+  [0, 30 s], 10 s when absent or unreadable (a signed number included); a 401 backs off the
+  whole loop; 404 and 5xx keep today's behaviour.
 - Identify ends within `identifyFor` plus one tick's fetch at any cadence.
 
 **Size:** L (about 330 lines of code, 600 of test). **Seat:** `cwd-implementer-opus5`: numerics
 (the combine, the backoff) and the dashboard's real API.
 
 **Plan gate:** rule 1: `TestCombine_isTheRankMaximumOverEveryMultisetUpToSix` and
-`TestRetryAfterDelay_sweep` (−100 … 100,000 s in steps of 7, as numbers and as dates). Pinned
-values: the ten rows; 12 s, 120 s, absent → 10 s, and the two bounds. **Known clean coincidences:**
+`TestRetryAfterDelay_sweep` (0 … 100,000 s in steps of 7, as numbers and as dates, each date
+also in the past). Pinned values: the ten rows; 12 s, 120 s, absent → 10 s, `-5` → 10 s, and the
+two bounds. **Known clean coincidences:**
 the default 10 s equals the device manager's enumerate cadence and the cap 30 s equals both
-`rejectedBackoff` and `feedLostAfterSeconds`; the sweep's step of 7 never lands on 10 or 30 from
-−100 (−100 + 7k: 10 is not reachable, 30 is not reachable; 12 and 120 are not either — the table
-pins those), so no pinned value is a sweep artefact. Rule 2: the loop sends GETs to the dashboard
+`rejectedBackoff` and `feedLostAfterSeconds`; the sweep's step of 7 from 0 lands on neither 10 nor 30 (7k: 10 and 30 are not multiples of
+7; 12 and 120 are not either — the table pins those), so no pinned value is a sweep artefact. Rule 2: the loop sends GETs to the dashboard
 with no body; the only joined list it emits is the log line `lines %v`, bounded by the record
 count × 99. Rule 3: `retryAfterDelay` is a parser; its real-shape fixtures are the RFC 7231
 example date, `http.TimeFormat` dates, and the integer form; an absent header is the omitted-key
@@ -3051,9 +3259,10 @@ case. Rule 4: none. Rule 5: none.
 pair; open; bind, replug or refuse; the unplug callback; a displaced or duplicate handle on the
 channel is ignored; one beacon failing darkens no other; quit closes every handle), §5.3's
 run-time guard ("same identity", retried every enumerate; hand-over within one keepalive period
-plus one enumerate), §14.2 (the fake bus, the deadlock guard), red-team notes 1 (the manager's identity check before the close), 2 (the displaced-callback
-scenario is **replaced** by its reachable producer: the same handle delivered twice, by the
-keepalive and by a failed command in one window; closed once), 5 (the tray word is T7's; here the
+plus one enumerate), §14.2 (the fake bus, the deadlock guard), red-team notes 1 (the manager's identity check before the close), 2 (pinned twice: the same
+handle delivered twice, by the keepalive and by a failed command in one window, closed once; and
+the plan's own producer of a displaced handle's late failure, a new-path replug whose old
+keepalive fails after the hand-over), 5 (the tray word is T7's; here the
 fact is recorded) and 6 (the vanished-path sweep, an addition the design does not name, makes the
 common replug hand over within one enumerate; the design's 15 s bound stays true and is stated in
 its wording fix).
@@ -3207,17 +3416,21 @@ type fakeDevice struct {
 // keepalive fires the unplug callback while holding it, so a Close or Stop
 // from inside the callback deadlocks — which the test catches with a timeout.
 type fakeBusHandle struct {
-	bus      *fakeBus
-	dev      *fakeDevice
-	key      string
-	mu       sync.Mutex
-	cmds     []StateValue
-	closes   int
-	failNext bool
-	dead     bool
-	lastOK   atomic.Bool
-	onUnplug func()
-	kick     chan struct{}
+	bus             *fakeBus
+	dev             *fakeDevice
+	key             string
+	mu              sync.Mutex
+	cmds            []StateValue
+	closes          int
+	failNext        bool
+	dead            bool
+	closed          bool // Close was called: the keepalive ends, every write is a defect
+	started         bool // StartIdleWorker was called
+	exited          bool // the keepalive goroutine has returned
+	writeAfterClose bool // a write arrived after Close: on the real library, freed memory
+	lastOK          atomic.Bool
+	onUnplug        func()
+	kick, ack       chan struct{} // one kick is one keepalive write; ack says it is done
 }
 
 func newFakeBus(mode identityMode) *fakeBus
@@ -3232,9 +3445,13 @@ func (b *fakeBus) unplug(path string)
 func (b *fakeBus) move(path, newPortKey string) string
 // failNext makes the handle's next command fail without unplugging.
 func (b *fakeBus) failNext(path string)
-// tick runs every started keepalive once: a write, or on a dead handle the
-// failure and the callback.
+// tick runs every started keepalive that has not exited once, and returns
+// when all of them are done: a write, or on a dead handle the failure and the
+// callback (after which that keepalive has exited), or on a closed handle its
+// exit. Synchronous, so a test can assert right after it.
 func (b *fakeBus) tick()
+// noWriteAfterClose fails the test if any handle was written after Close.
+func (b *fakeBus) noWriteAfterClose(t *testing.T)
 func (b *fakeBus) handle(path string) *fakeBusHandle // the latest handle on the path
 func (b *fakeBus) Enumerate() ([]deviceInfo, error)
 func (b *fakeBus) Open(info deviceInfo) (deviceHandle, error) // refuses an unplugged path
@@ -3242,15 +3459,38 @@ func (b *fakeBus) Open(info deviceInfo) (deviceHandle, error) // refuses an unpl
 func (h *fakeBusHandle) Spin() error  { return h.cmd(StateSpin) }
 func (h *fakeBusHandle) Flash() error { return h.cmd(StateFlash) }
 func (h *fakeBusHandle) Stop() error  { return h.cmd(StateIdle) }
-func (h *fakeBusHandle) Close() error { h.mu.Lock(); defer h.mu.Unlock(); h.closes++; return nil }
+// Close stops the keepalive and waits for it, as the library's Close does
+// since T1: a Close from inside the callback still deadlocks on h.mu.
+func (h *fakeBusHandle) Close() error {
+	h.mu.Lock()
+	h.closes++
+	h.closed = true
+	run := h.started && !h.exited
+	h.mu.Unlock()
+	if run {
+		h.kick <- struct{}{}
+		<-h.ack
+	}
+	return nil
+}
 func (h *fakeBusHandle) Key() string  { return h.key }
 func (h *fakeBusHandle) OnUnplug(f func()) { h.mu.Lock(); defer h.mu.Unlock(); h.onUnplug = f }
-func (h *fakeBusHandle) StartIdleWorker()  { go h.keepalive() }
+func (h *fakeBusHandle) StartIdleWorker() {
+	h.mu.Lock()
+	h.started = true
+	h.kick, h.ack = make(chan struct{}), make(chan struct{})
+	h.mu.Unlock()
+	go h.keepalive()
+}
 func (h *fakeBusHandle) Live() bool        { return h.lastOK.Load() }
 
 func (h *fakeBusHandle) cmd(s StateValue) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closed {
+		h.writeAfterClose = true
+		return errors.New("write after close")
+	}
 	if h.dead || h.failNext {
 		h.failNext = false
 		return errors.New("write failed: device gone")
@@ -3259,25 +3499,66 @@ func (h *fakeBusHandle) cmd(s StateValue) error {
 	return nil
 }
 
-// keepalive is the fake's worker: each kick is one 5-second write.
+// keepalive is the fake's worker: each kick is one 5-second write, answered
+// on ack when done. It ends on a closed handle without writing, and on a dead
+// device after the callback, as the library's worker does.
 func (h *fakeBusHandle) keepalive() {
 	for range h.kick {
 		h.mu.Lock()
-		if h.dead {
+		switch {
+		case h.closed:
+			h.exited = true
+			h.mu.Unlock()
+			h.ack <- struct{}{}
+			return
+		case h.dead:
 			h.lastOK.Store(false)
 			if h.onUnplug != nil {
 				h.onUnplug() // under h.mu, as the library does
 			}
+			h.exited = true
 			h.mu.Unlock()
+			h.ack <- struct{}{}
 			return
 		}
 		h.lastOK.Store(true)
 		h.mu.Unlock()
+		h.ack <- struct{}{}
+	}
+}
+
+// tick: every started, not-exited keepalive is kicked and waited for in turn.
+func (b *fakeBus) tick() {
+	for _, path := range b.order {
+		for _, h := range b.devs[path].handles {
+			h.mu.Lock()
+			run := h.started && !h.exited
+			h.mu.Unlock()
+			if run {
+				h.kick <- struct{}{}
+				<-h.ack
+			}
+		}
+	}
+}
+
+func (b *fakeBus) noWriteAfterClose(t *testing.T) {
+	t.Helper()
+	for _, path := range b.order {
+		for i, h := range b.devs[path].handles {
+			h.mu.Lock()
+			bad := h.writeAfterClose
+			h.mu.Unlock()
+			if bad {
+				t.Errorf("%s handle %d was written after Close", path, i)
+			}
+		}
 	}
 }
 ```
 
-  `lastOK` starts true at open (as the library's does). The test manager runs `scan()` by hand
+  `lastOK` starts true at open (as the library's does), and a closed handle's keepalive ends and
+  never writes again (as the library's does since T1). The test manager runs `scan()` by hand
   (no goroutine) and drains `m.dropped` by hand through `drainDropped()`, so every scenario is
   deterministic; one test runs `run(ctx)` with `deviceScanInterval` shortened to prove the loop.
 
@@ -3304,6 +3585,23 @@ func drainDropped(m *deviceManager) {
 	}
 }
 
+// configureKeys makes b1..bN configured records holding these keys (named
+// L1..LN, following nothing), as twoBeaconConfig does for the loop and HTTP
+// tests. Every test that unplugs a light and then asks after it by id does
+// this first: a configured beacon keeps its record and id while unplugged
+// (§10.3); an in-memory one vanishes (§10.4), which threeLights relies on
+// and the others must not.
+func configureKeys(app *AppState, keys ...string) {
+	cfg := defaultConfig()
+	cfg.Beacons = nil
+	for i, k := range keys {
+		cfg.Beacons = append(cfg.Beacons, BeaconRecord{ID: fmt.Sprintf("b%d", i+1), Key: k, Name: fmt.Sprintf("L%d", i+1),
+			FlashSeconds: 15, LobbyFlashSeconds: 10, PauseSide: pauseSideBoth})
+	}
+	cfg.BeaconSeq = len(keys)
+	app.syncConfig(cfg)
+}
+
 func TestManager_threeLightsBecomeThreeBeacons(t *testing.T) {
 	for _, mode := range []identityMode{identitySerial, identityPort} {
 		app, bus, m := newManagerUnderTest(t, mode)
@@ -3321,7 +3619,7 @@ func TestManager_threeLightsBecomeThreeBeacons(t *testing.T) {
 				t.Errorf("mode %v: beacon %d = %+v", mode, i, v)
 			}
 		}
-		if bus.handle(bus.order[0]).kick == nil {
+		if !bus.handle(bus.order[0]).started {
 			t.Error("the keepalive was not started")
 		}
 	}
@@ -3330,6 +3628,7 @@ func TestManager_threeLightsBecomeThreeBeacons(t *testing.T) {
 func TestManager_oneFailingBeaconDarkensNoOther(t *testing.T) {
 	app, bus, m := newManagerUnderTest(t, identityPort)
 	p1, p2, p3 := bus.plug("", "p1", 1, 1), bus.plug("", "p2", 1, 1), bus.plug("", "p3", 1, 1)
+	configureKeys(app, "port:p1", "port:p2", "port:p3")
 	m.scan()
 	app.Command("b1", StateSpin)
 	app.Command("b2", StateSpin)
@@ -3366,6 +3665,7 @@ func TestManager_unplugByKeepaliveThenReplugSamePath(t *testing.T) {
 	// "not already open" filter has nothing to skip and the light is bound again.
 	app, bus, m := newManagerUnderTest(t, identityPort)
 	p := bus.plug("", "p1", 1, 1)
+	configureKeys(app, "port:p1")
 	m.scan()
 	app.Command("b1", StateSpin)
 	bus.unplug(p)
@@ -3381,17 +3681,19 @@ func TestManager_unplugByKeepaliveThenReplugSamePath(t *testing.T) {
 	if !v.Connected || v.State != StateIdle || len(app.Views()) != 1 {
 		t.Errorf("after the replug: %+v (%d beacons)", v, len(app.Views()))
 	}
+	bus.noWriteAfterClose(t)
 }
 
 func TestManager_aVanishedPathIsAnUnplugEvenBeforeTheKeepaliveRuns(t *testing.T) {
 	app, bus, m := newManagerUnderTest(t, identityPort)
 	p := bus.plug("", "p1", 1, 1)
+	configureKeys(app, "port:p1")
 	m.scan()
 	bus.unplug(p) // no tick: the callback never fires
 	m.scan()
 	drainDropped(m)
-	if v, _ := app.View("b1"); v.Connected {
-		t.Error("a path missing from enumeration must count as unplugged")
+	if v, ok := app.View("b1"); !ok || v.Connected {
+		t.Error("a path missing from enumeration must count as unplugged, and the record stays")
 	}
 }
 
@@ -3400,6 +3702,7 @@ func TestManager_sameHandleDeliveredTwiceIsClosedOnce(t *testing.T) {
 	// command fails in the same window, and both hand the handle over.
 	app, bus, m := newManagerUnderTest(t, identityPort)
 	p := bus.plug("", "p1", 1, 1)
+	configureKeys(app, "port:p1")
 	m.scan()
 	bus.unplug(p)
 	app.Command("b1", StateSpin) // fails: dropHandle, first delivery
@@ -3422,21 +3725,36 @@ func TestManager_aReplugAtANewPathIsTakenOverWithinOneScan(t *testing.T) {
 	// the new path binds in the same scan, before any keepalive has run: the
 	// hand-over is one enumerate, inside the design's bound of a keepalive
 	// period plus an enumerate.
+	//
+	// It is also the producer of a displaced handle's late failure (red-team
+	// note 2): the old handle's keepalive is still running when the new path
+	// takes the record, and its next write fails after the hand-over.
 	app, bus, m := newManagerUnderTest(t, identitySerial)
 	p := bus.plug("S1", "p1", 1, 1)
+	configureKeys(app, "sn:S1")
 	m.scan()
 	app.Command("b1", StateSpin)
 	old := bus.handle(p)
 	p2 := bus.move(p, "p9") // unplugged and back at a new port; no keepalive has run
 	m.scan()
+	if len(m.dropped) != 1 {
+		t.Fatalf("%d handles on the channel after the replug scan, want the old one once", len(m.dropped))
+	}
+	// The displaced handle's keepalive now fails: its callback is ignored,
+	// the record and the new handle are untouched, nothing more is queued.
+	bus.tick()
+	if len(m.dropped) != 1 || bus.handle(p2).closes != 0 {
+		t.Errorf("after the displaced keepalive failed: %d on the channel, new handle closes %d; want 1 and 0", len(m.dropped), bus.handle(p2).closes)
+	}
 	drainDropped(m)
 	v, _ := app.View("b1")
-	if !v.Connected || v.SameIdentity || old.closes != 1 || len(app.Views()) != 1 || m.open[p2] == nil || m.paths[old] != "" {
-		t.Errorf("after the replug scan: %+v, old closes %d, %d beacons, open[p2] %v", v, old.closes, len(app.Views()), m.open[p2] != nil)
+	if !v.Connected || v.SameIdentity || old.closes != 1 || bus.handle(p2).closes != 0 || len(app.Views()) != 1 || m.open[p2] == nil || m.paths[old] != "" {
+		t.Errorf("after the replug: %+v, old closes %d, new closes %d, %d beacons, open[p2] %v", v, old.closes, bus.handle(p2).closes, len(app.Views()), m.open[p2] != nil)
 	}
 	if v.State != StateIdle {
 		t.Error("a rebound light starts idle; the loop's next tick re-applies the wanted state")
 	}
+	bus.noWriteAfterClose(t)
 }
 
 func TestManager_aStaleHandleStillEnumeratedIsReplacedNotRefused(t *testing.T) {
@@ -3446,6 +3764,7 @@ func TestManager_aStaleHandleStillEnumeratedIsReplacedNotRefused(t *testing.T) {
 	// its key replaces it instead of being refused.
 	app, bus, m := newManagerUnderTest(t, identitySerial)
 	p := bus.plug("S1", "p1", 1, 1)
+	configureKeys(app, "sn:S1")
 	m.scan()
 	old := bus.handle(p)
 	old.lastOK.Store(false)        // the keepalive failed; nothing has dropped the handle yet
@@ -3472,10 +3791,22 @@ func TestManager_aTrueTwinIsRefusedEveryScanAndNamed(t *testing.T) {
 	if !v.SameIdentity || len(app.Views()) != 1 {
 		t.Errorf("the twin must not become a beacon: %+v, %d beacons", v, len(app.Views()))
 	}
-	if bus.handle(twin).closes != 3 {
-		t.Errorf("the twin's path was opened and closed %d times over three scans, want 3 (tried again every time)", bus.handle(twin).closes)
+	hs := bus.devs[twin].handles
+	if len(hs) != 3 {
+		t.Errorf("the twin's path was opened %d times over three scans, want 3 (tried again every time)", len(hs))
 	}
-	// The tray's words for it are T7's (beaconRowTitle); the fact is the view's SameIdentity.
+	for i, h := range hs {
+		if h.closes != 1 {
+			t.Errorf("the twin's handle %d was closed %d times, want 1", i, h.closes)
+		}
+	}
+	// The tray's words for it are T7's (beaconRowTitle); the fact is the view's SameIdentity,
+	// and it clears once the twin is gone.
+	bus.unplug(twin)
+	m.scan()
+	if v, _ := app.View("b1"); v.SameIdentity {
+		t.Error("the warning must clear at the first scan without the twin")
+	}
 }
 
 func TestManager_aSecondCollectionPathIsNeverOpened(t *testing.T) {
@@ -3532,6 +3863,7 @@ func TestManager_quitStopsAndClosesEveryHandle(t *testing.T) {
 			t.Errorf("%s: closes %d, last command %v; want stopped then closed", p, h.closes, h.cmds)
 		}
 	}
+	bus.noWriteAfterClose(t)
 }
 
 func TestManager_enumerateErrorsAreLoggedAndRetried(t *testing.T) {
@@ -3568,7 +3900,8 @@ func TestManager_enumerateErrorsAreLoggedAndRetried(t *testing.T) {
 
 **Acceptance:**
 - Every §14.2 scenario in this task's list passes in both modes where the mode matters.
-- A handle is closed exactly once in every scenario (`closes` asserted everywhere).
+- A handle is closed exactly once in every scenario (`closes` asserted everywhere), and no
+  handle is written after its Close (`noWriteAfterClose` in every test that closes one).
 - The deadlock guard test hangs for its 200 ms when a Close is attempted inside the callback.
 - The real manager's `run` is exercised once (the quit test).
 
@@ -3943,15 +4276,28 @@ the §9.2 aggregate, the tooltip, the S14 boolean), D4 as recommended, §12's tr
 light (red-team note 5: a fact, no cause), §5.4 (Identify in each submenu).
 
 **Files:**
-- Modify: `cmd/blinkybeacon-tray/tray.go` (175 lines; `windows || darwin`)
+- Modify: `cmd/blinkybeacon-tray/tray.go` (as S14 leaves it on `dashboard`; `windows || darwin`)
+- Modify: `cmd/blinkybeacon-tray/tray_look.go`, `tray_look_test.go` (S14's; `boundRowNamesALine` and
+  its test go, since `bound` now comes from the registry)
 - Create: `cmd/blinkybeacon-tray/tray_labels.go`, `tray_labels_test.go` (no build tag: the words)
 - Create: `cmd/blinkybeacon-tray/tray_slots.go`, `tray_slots_test.go` (no build tag: the slot logic
   over a menu-item interface, with a fake that models Windows)
-- Not touched: `icons.go` (the four icons stay; S14 adds its mark on its own branch)
+- Not touched: `icons.go` (S14's seven icons, mark included, stay as they are)
+
+**Departs from the design's §11.1** (`anyConnectedBeaconFollowsALine()` and "S14's own constant
+chooses the mark"): S14 shipped first (`wt/s14-bound-icon`, `dashboard-v0.9.0`) with
+`trayIcon(l trayLook) []byte` over `trayLook{state, connected, bound}` in `tray_look.go`, `bound`
+read from the bound row's words (`boundRowNamesALine`, `tray.go:103`). T7 keeps S14's type and
+function and changes only where `bound` comes from: the registry's `AnyConnectedFollowsALine()`,
+through `trayLookFor`. **Assumption:** S14 has merged into `dashboard` before the build branch is
+cut; if it has not when wave 2 starts, the master re-sequences T7 after it rather than having T7
+create a second `trayLook`.
 
 **Interfaces:**
 - Consumes: T3's `Views`, `Aggregate`, `AnyConnectedFollowsALine`, `Lines`, `LineWatch`,
-  `LineLabel`, `Command`, `CommandAll`, `Identify`; T4's `watchStatusLabel`.
+  `LineLabel`, `Command`, `CommandAll`, `Identify`, `watchStatusLabel` (its throttled case
+  included); S14's `trayLook` and `trayIcon` (`tray_look.go`, merged before this build starts).
+  Nothing of T4's.
 - Produces:
 
 ```go
@@ -3996,11 +4342,10 @@ func trayDashboardRow(lines []int, watch func(int) (WatchStatus, WatchDetail), l
 // most eight beacons listed, then "+N".
 func trayTooltip(views []beaconView, label func(int) string) string
 
-// trayIcon picks the icon for the aggregate: grey when nothing is plugged
-// in, else orange/red/blue for spin/flash/idle. bound is the S14 hook —
-// true when any connected beacon follows a line — unused until S14 chooses
-// its mark.
-func trayIcon(state StateValue, connected, bound bool) []byte
+// trayLookFor is the one look the icon shows for the beacons as a whole: the
+// §9.2 aggregate, with bound true when any connected beacon follows a line
+// (the S14 hook). trayIcon(trayLookFor(app)) is S14's function on it.
+func trayLookFor(app *AppState) trayLook
 
 // tray_slots.go
 // menuItem is what a slot needs of a systray item.
@@ -4050,8 +4395,10 @@ func (t *slotTable) beaconAt(i int) string
   dashboard row, the HTTP row, Settings…, separator, Spin/Flash/Stop (every beacon), separator,
   **eight slots** (each `AddMenuItem("", "")` then `Hide()`, with six `AddSubMenuItem` children:
   status and following disabled; the four actions), separator, Start with Windows, Quit. The 500 ms
-  loop: `views := state.Views()`; `unshown := slots.sync(views, words)`; icon via
-  `trayIcon(state.Aggregate(), state.AnyConnectedFollowsALine())`; tooltip; top row (with the
+  loop: `views := state.Views()`; `unshown := slots.sync(views, words)`; the icon as S14 draws it,
+  with the one change at `tray.go:103`: `look := trayLookFor(state)` replaces
+  `trayLook{state: sv, connected: connected, bound: boundRowNamesALine(bound)}`, and
+  `trayNeedsRedraw`/`systray.SetIcon(trayIcon(look))` stay; tooltip; top row (with the
   `(8 shown here)` suffix when `unshown > 0`); dashboard row; the every-beacon buttons enabled by
   the aggregate as today (`tray.go:107-136`'s rules). Clicks: one goroutine per slot selecting on
   its four children's `ClickedCh`, calling `state.Command(slots.beaconAt(i), …)` and
@@ -4166,22 +4513,29 @@ func TestTrayLabels_dashboardRow(t *testing.T) {
 	}
 }
 
-func TestTrayIcon_isTheAggregate(t *testing.T) {
-	cases := []struct {
-		state     StateValue
-		connected bool
-		want      []byte
-	}{
-		{StateIdle, false, iconDisconnected}, {StateSpin, false, iconDisconnected},
-		{StateIdle, true, iconIdle}, {StateFlash, true, iconFlash}, {StateSpin, true, iconSpin},
+func TestTrayLookFor_isTheAggregateAndTheS14Hook(t *testing.T) {
+	app := newTestApp(t)
+	app.updateConfig(func(c *Config) error {
+		c.Beacons[0].Lines = []int{1}
+		c.Beacons = append(c.Beacons, BeaconRecord{ID: "b2", Key: "port:z", Name: "Spare", FlashSeconds: 15, LobbyFlashSeconds: 10, PauseSide: pauseSideBoth})
+		c.BeaconSeq = 2
+		return nil
+	})
+	if got := trayLookFor(app); got != (trayLook{state: StateIdle, connected: false, bound: false}) {
+		t.Errorf("nothing plugged in: %+v", got)
 	}
-	for _, c := range cases {
-		if got := trayIcon(c.state, c.connected, false); !bytes.Equal(got, c.want) {
-			t.Errorf("trayIcon(%v,%v) picked the wrong icon", c.state, c.connected)
-		}
-		if got := trayIcon(c.state, c.connected, true); !bytes.Equal(got, c.want) {
-			t.Errorf("bound=true must not change the icon until S14 chooses its mark")
-		}
+	plantKeyed(app, "port:z", &countingBeacon{}) // Spare follows nothing
+	app.Command("b2", StateSpin)
+	if got := trayLookFor(app); got != (trayLook{state: StateSpin, connected: true, bound: false}) {
+		t.Errorf("one unbound light spinning: %+v", got)
+	}
+	plant(app, &countingBeacon{}) // takes b1, which follows line 1
+	if got := trayLookFor(app); got != (trayLook{state: StateSpin, connected: true, bound: true}) {
+		t.Errorf("a bound light is plugged in: %+v", got)
+	}
+	// S14's icon for a look is S14's test; here only that the mark follows the hook.
+	if !bytes.Equal(trayIcon(trayLookFor(app)), iconSpinBound) {
+		t.Error("a bound, spinning look must carry the mark")
 	}
 }
 ```
@@ -4371,7 +4725,8 @@ func TestSlots_theRuleIsBrokenByANaiveImplementation(t *testing.T) {
 **Acceptance:**
 - The slot invariants hold over every sequence in the tests; the fake's own self-test proves they
   bite.
-- Every label function is table-tested; every joined list is bounded (four lines, eight beacons).
+- Every label function is table-tested; every joined list is bounded (four lines, eight beacons);
+  `trayLookFor` carries the aggregate and the S14 hook, and the mark follows it.
 - The Windows build links; the hidden-parent re-show on real Windows is T10's hand step.
 
 **Size:** M (about 320 lines of code, 330 of test). **Seat:** `cwd-implementer-opus5`: a
@@ -4381,8 +4736,10 @@ third-party API (`systray`) whose Windows behaviour the fake has to model exactl
 OS; every joined list is bounded — four line names (each the dashboard's label, which `lineName`
 cuts at 24 runes with "…"), eight beacons in the tooltip, names at most 40 runes — so no title
 exceeds about 200 characters; a Windows menu item holds 256. Rule 3: n/a. Rule 4: none. Rule 5:
-none. **S14 note for the master:** `wt/s14-bound-icon` also edits `tray.go` and `icons.go`;
-whichever lands second merges by hand; the hook S14 needs is `trayIcon`'s `bound` argument.
+none. **S14 note for the master:** S14 lands first; T7 edits S14's `tray.go` and removes
+`boundRowNamesALine` from `tray_look.go` and its test, the hook being `trayLookFor(app).bound` =
+`app.AnyConnectedFollowsALine()`. `trayLook`, `trayIcon` and the seven icons are S14's and do not
+change.
 
 ---
 
@@ -4986,7 +5343,9 @@ var preferredUsage *usagePair = nil // or &usagePair{Page: 0x…, Usage: 0x…}
   two paths of one light (same light flashed for two `beacon N`) whose instance segments differ
   only in a trailing `&000N`, the port key must drop that trailing counter so both paths share one
   key; that is a one-line change to `windowsPortKey` **decided from the file**, with the two real
-  paths as its test. If the file shows one path per light, nothing changes.
+  paths as its test, and it **departs from the design's §5.2** ("the segment between the second
+  and third `#`", whole) for the reason the file shows: the plan records the departure in the
+  amendments table when it is taken. If the file shows one path per light, nothing changes.
 - [ ] **Step 3: Write the failing test** — the real lines:
 
 ```go
@@ -5094,6 +5453,8 @@ var _ deviceHandle = (*farmHandle)(nil)
   `mgrCtx, stopMgr := context.WithCancel(…)`, `go mgr.run(mgrCtx)`; `OnQuit` calls `stopWatch()`,
   `stopMgr()`, waits for `mgr.done` (a channel `run` closes after it has stopped and closed every
   handle; add `done chan struct{}` to the manager in this task), then shuts the HTTP server down.
+  Per handle `run` calls `Stop()` then `Close()`; `Stop()` starts a fresh keepalive worker and
+  T1's `Close` stops it before freeing the device, so the order is safe.
 
 - [ ] **Step 1: The failing check** is `go vet` under `GOOS=windows` (`undefined: farmSource`) and
   the compile-time assertion. **Disarm:** remove `Live()` from `farmHandle` — the assertion in
@@ -5229,7 +5590,7 @@ and re-run from that step.
 | # | The note | Placed in | How |
 |---|---|---|---|
 | 1 | Make the callback's "mark unplugged" identity-checked, or move the mark into the manager after its check | **T3** (`dropHandle` marks only the entry that holds exactly that handle, else ignores it; `TestRegistry_dropHandleIgnoresAHandleNoEntryHolds`) and **T5a** (`closeDropped` closes only a handle it still lists) | the callback is `app.dropHandle(h)`, identity-checked twice: at the mark and at the close |
-| 2 | T5's "displaced handle's late callback" has no reachable producer | **T5a**: the synthetic scenario is **dropped**; its reachable cousin replaces it — one handle delivered twice (a failed command and the keepalive in one window), closed once (`TestManager_sameHandleDeliveredTwiceIsClosedOnce`) | the library's worker exits after one failure, so no handle fires twice; two *deliveries* of one handle do happen, and the same check covers them |
+| 2 | T5's "displaced handle's late callback" has no reachable producer | **T5a**, pinned twice: one handle delivered twice (a failed command and the keepalive in one window), closed once (`TestManager_sameHandleDeliveredTwiceIsClosedOnce`); and the producer the plan's own manager has — a new-path replug whose displaced keepalive fails after the hand-over — ignored, with the record and the new handle untouched (`TestManager_aReplugAtANewPathIsTakenOverWithinOneScan`) | the library's worker fires once per handle, so the reachable cases are two deliveries of one handle and one late delivery from a displaced handle; the same identity check covers both |
 | 3 | `LastAttemptOK` must start `true` at open | **T1** (`newFarmBeacon` stores true; the worker records the initial write; `TestFarmBeacon_lastAttemptOKStartsTrue`) | |
 | 4 | A never-saved in-memory id reused after a restart meets the merge | **Set aside with a reason, and pinned in T8**: the form token is per process (`settingsHandler.csrf`, `settings_handler.go:151-159`, minted once per handler, and a restart makes a new handler), so a tab from before a restart cannot save at all — 403, nothing written (`TestSettingsPost_aTabFromAnEarlierProcessCannotPromoteAnInMemoryId`). Within one process the counter advances in memory and is never reused. **And** T2/T3 give the reservation anyway: `updateConfig` stamps `beacon_seq` with the live counter on every save, so an in-memory id issued before any later save is reserved on disk (`TestRegistry_theLiveCounterIsReservedByTheNextSaveOfAnything`) | the alternative the note offered ("bump on the first save after an in-memory id was issued") is what `updateConfig` does |
 | 5 | The `port`-mode twin cannot occur with two lights at once; the tray sentence must not promise a cause | **T7** (`beaconRowTitle`: ` · ▲ another light reports this identity and was not opened` — what happened, no why; `TestTrayLabels_beaconRows`), **T5a** (`markSameIdentity`), and the design's §5.3 and §12 item 1 wording (below) | |
@@ -5256,12 +5617,12 @@ Four sentences in `docs/specs/2026-10-20-several-beacons.md`, listed for the PR:
 | Task | Rule 1 numeric sweep | Rule 2 payload | Rule 3 loader/parser smoke | Rule 4 negative env | Rule 5 controller hunks |
 |---|---|---|---|---|---|
 | T0 | public ids to 10⁷; pinned `b1`–`b3` are plain members | — | Windows path shape (real lines in T0b) | — | — |
-| T1 | — | the three unchanged 10-byte reports | — | Linux without `libudev.h` (compile fails: documented quirk) and a light-less macOS runner (SKIP) | — |
+| T1 | — | the three unchanged 10-byte reports; no write after `Close` (the fake device records one) | — | Linux without `libudev.h` (compile fails: documented quirk) and a light-less macOS runner (SKIP; the two unit tests PASS) | — |
 | T2 | 500 random id lists, numbers to 10⁶; pinned `b01`, duplicate `b1`, `B2`, `beacon_seq: 1`; the sample's `3` coincides with nothing | the JSON file; lists bounded by record count | v0.5.0, v0.7.0, v0.8.0 (exact bytes), keys-omitted, new shape; load writes nothing; the owner's file in T10 step 1 | — | — |
 | T3m | — | — | — | — | — |
 | T3 | every multiset of ≤ 6 (connected, state) pairs; pinned: the §9.2 table; one-beacon pass-through is the intended coincidence | today's replies, unchanged | — | — | — |
-| T4 | 3¹…3⁶ combine, checked reversed, idempotent, monotone; `Retry-After` −100…100,000 s as numbers and dates; pinned 12 s, 120 s, absent; coincidences named: 10 s = enumerate cadence, 30 s = `rejectedBackoff` = `feedLostAfterSeconds` | dashboard GETs, no body; the log's line list bounded | `Retry-After` on the RFC's example date, `http.TimeFormat`, integers, absent | — | — |
-| T5a | — | — (the fake receives the writes) | — | — | — |
+| T4 | 3¹…3⁶ combine, checked reversed, idempotent, monotone; `Retry-After` 0…100,000 s as numbers and dates, every date also a second time in the past; pinned 12 s, 120 s, absent, and `-5` → 10 s; coincidences named: 10 s = enumerate cadence, 30 s = `rejectedBackoff` = `feedLostAfterSeconds` | dashboard GETs, no body; the log's line list bounded | `Retry-After` on the RFC's example date, `http.TimeFormat`, integers, absent | — | — |
+| T5a | — | — (the fake receives the writes; none after a Close, `noWriteAfterClose`) | — | — | — |
 | T6 | — | `/status`, control replies: two fixed keys; `/beacons`: N × (≤ 40-rune name + ≤ 99 ints); error bodies fixed | `?beacon=` as the module (no body), curl (percent-encoded), a form body, a malformed body, empty | — | — |
 | T7 | — | menu titles: ≤ 4 lines (labels cut at 24 runes), ≤ 8 beacons in the tooltip, names ≤ 40 runes | — | — | — |
 | T8 | — | page rows bounded as `/beacons`; 409 and the note carry public ids only | the browser's full form; unticked boxes, no lines, no takeover, absent row; an earlier process's form | — | — |
@@ -5354,7 +5715,29 @@ Run with the design open beside the plan after the last section was written.
    `fakeHandle`, `newTestApp`, `newTestAppNoTemp`. `countingBeacon`, `mockBeacon` and
    `flashCounter` stay in the files that define them today. `stateOf`, `twoBeaconConfig` and
    `linesDashboard` are T4's and used only there; `twoBeaconServer`, `post`, `get` are T6's;
-   `twoBeaconForm`, `twoBeaconApp` are T8's; `beaconRowTitle` and the other words are T7's and
-   named by no other task's test. The signatures named in a task's Consumes block match the
+   `twoBeaconForm`, `twoBeaconApp` are T8's; `beaconRowTitle`, `trayLookFor` and the other words
+   are T7's and named by no other task's test; `trayLook`, `trayIcon` and the icons are S14's;
+   `configureKeys` is T5a's; `fakeHID` is T1's. The signatures named in a task's Consumes block match the
    Produces block of the task that owns them, checked by grep over this file for each name.
 4. **Review Focus.** Each of the five has its named test in its task (T3, T8, T4, T7, T6).
+
+## Amendments — plan review 2026-10-20
+
+A plan-review seat read the plan at `fe1be4e`: READY WITH FIXES, five Important and seven Minor
+findings, the plan gate passing. The master ruled all twelve in (`sessions/retros/assets/2026-10-20-blinkybeacon-s16-plan/plan-revision-1.md`);
+this revision applies them. The design changed nowhere in this round.
+
+| # | Finding | Ruling, as applied | Where the plan changed |
+|---|---|---|---|
+| F1 | Important — T5a's manager tests expected an unplugged **in-memory** beacon to keep its entry and id; §10.4 and T3 make it vanish | every manager test that unplugs a light and asks after it by id first makes its records configured (`configureKeys`, as `twoBeaconConfig` does for the loop and HTTP tests); T3's `dropHandle` doc says a configured entry stays unplugged and an in-memory one is removed; T3's two tests that dropped an in-memory light now use a configured one or assert the vanish | T3 Interfaces (`dropHandle`), T3 Step 2 (`droppingTheOnlyHandle…`, `identifyFlashes…`), T5a Step 1 (the helper and six tests) |
+| F2 | Important — the 429 test wanted 4–6 polls but the stub kept answering 429, so the wait re-armed (2 polls) | the stub gains `throttleOnce`; the test uses it and its arithmetic says 5 or 6; a second test keeps a line that still answers 429 pinned at 2 polls in 20 s | T4 Step 1 (`linesDashboard`, the two tests), T4 Step 2 (the disarm) |
+| F3 | Important — bind-saves ran in unjoined goroutines and could outlive `withTempConfig`'s cleanup (a `-race` failure, or a write into the developer's real config dir) | `bind` saves synchronously after `a.mu` is released; the one save that must be asynchronous (`syncConfig`'s absorb, which may run inside the store's `onChange`) is counted by `AppState.saves`, and `newTestAppNoTemp` registers `t.Cleanup(app.saves.Wait)` so it runs before `configDir` is restored; the leak-catcher is `TestRegistry_syncAbsorbsAnInMemoryLightIntoAnUnmatchedRecordAndSavesIt` | T3 Interfaces (`bind`, `syncConfig`, the struct), T3 Step 1 (`newTestAppNoTemp`), T3 Step 2 (the new test; `aFirstSeenLight…` asserts the save without waiting), T3 Step 4 |
+| F4 | Important — `FarmBeacon.Close` frees the HID device while the keepalive worker may still run; its next write uses freed memory (reached on about half of unplugs through the manager's sweep, and by today's Quit) | fixed in the library: `Close` nudges a listening worker, waits for it (the mutex it holds for its life), then closes the device; `hidDevice` is an interface so the keepalive is unit-tested without a light, with `keepaliveEvery` as a var; two tests on the macOS leg; the "byte-for-byte unchanged" acceptance replaced; today's Quit (`Stop()` then `Close()`) named as also fixed; T5a's fake models it (a closed handle's keepalive ends and never writes again, `noWriteAfterClose`); T5b says why Stop-then-Close is safe | T1 throughout, T5a (the fake, the quit and unplug tests, acceptance), T5b, the task and plan-gate tables |
+| F5 | Important — T7's label test needed the throttled case of `watchStatusLabel`, which T4 added in the same wave | the case moves to T3 beside the constant it already declares; T4 keeps its test of it; T7 consumes nothing of T4's | T3 Files, T4 Files, T7 Consumes |
+| F6 | Minor — a negative `Retry-After` backed off 0 s; the design says unreadable → 10 s | a number is digits only: `-5` is unreadable and lands on 10 s, pinned; the sweep runs from 0, every date also tried in the past (0 s) | T4 Interfaces, Step 1 (`pinnedValues`, `sweep`), Step 3, acceptance, plan gate; Review Focus 3; the plan-gate table |
+| F7 | Minor — the tick code to transcribe re-armed a still-throttled line every tick; `fresh` was only a parenthetical | `fresh bool` on `lineResult`, set by `fetchLines` for a fetched result, gates the re-arm in the block | T4 (the tick and `fetchLines` blocks) |
+| F8 | Minor — the twin test asserted three closes on a handle closed once | `len(handles) == 3`, each closed once; and the warning clears at the first scan without the twin | T5a Step 1 (`aTrueTwin…`) |
+| F9 | Minor — the fake's `kick == nil` check could not fail; `tick()` was not defined as synchronous | the fake handle tracks `started`, `exited` and `closed`; `tick()` kicks every started, not-exited keepalive and waits for its ack; `Close` stops and waits as the library's does; the threeLights check reads `started` | T5a (the fake's struct, `tick`, `Close`, `StartIdleWorker`, `keepalive`) |
+| F10 | Minor — "unmatched configured record" had to be judged on the entry's key after the merge | one sentence in `syncConfig`'s doc | T3 Interfaces |
+| F11 | Minor — red-team note 2's scenario has a reachable producer in the plan's own manager (a new-path replug's displaced worker) | `aReplugAtANewPath…` ticks the old keepalive after the hand-over: one delivery on the channel, b1 stays connected, the new handle is not closed; the note's row says so | T5a Step 1, "Where each red-team note landed" row 2, T5a Carries out |
+| F12 | Minor — departures from the design's signatures were not recorded as departures | "Departs from the design's §n" lines in T1 (`OpenPath(info)`), T3 (`AnyConnectedFollowsALine`), T7 (S14's `trayIcon(trayLook)`, reached through `trayLookFor`; how the call at `tray.go:103` changes; the assumption that S14 has merged) and T0b (the `&000N` rule, taken only from the file); the S14 note names the final hook | T1, T3, T7, T0b |
