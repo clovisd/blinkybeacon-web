@@ -10,13 +10,13 @@ Go 1.25+ is required (`go.mod` says `go 1.25.0`).
 ## Option A — GitHub Actions (what releases use)
 
 [`.github/workflows/build.yml`](.github/workflows/build.yml) builds both
-architectures on a macOS runner on every push to `main`, and attaches them to the
-GitHub release on a `v*` tag:
+architectures on a macOS runner on every push to `main` or `dashboard`, and
+attaches them to the GitHub release on a release tag (`v*` or `dashboard-v*`):
 
 | Artifact | Contents |
 |---|---|
-| `blinkybeacon-tray-macos-arm64.zip` | Apple Silicon: `BlinkyBeacon.app` + the bare `blinkybeacon-tray` binary |
-| `blinkybeacon-tray-macos-amd64.zip` | Intel: the same pair |
+| `BB-DASH-macos-arm64.zip` | Apple Silicon: `BlinkyBeacon.app` + the bare `blinkybeacon-tray` binary |
+| `BB-DASH-macos-amd64.zip` | Intel: the same pair |
 
 Each zip has a `.sha256` beside it. Run the workflow by hand from the Actions
 tab (`workflow_dispatch`) to get artifacts for any branch.

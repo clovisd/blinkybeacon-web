@@ -644,9 +644,11 @@ func TestSettingsPost_acceptsTheEndsOfTheRange(t *testing.T) {
 }
 
 func TestSettingsPost_aFormWithoutTheNewFieldsSavesTheDefaults(t *testing.T) {
-	// A form from before v0.6.0 — a stale tab, a bookmarked POST. Absent is not
-	// a refusable mistake, it is a form that predates the field, and the same
-	// place addr, port and line_number already land is the documented default.
+	// A save that carries this process's token but none of the light fields.
+	// No tab sends one: this page always carries them, and a stale tab's token
+	// is refused first (see the earlier-process test below). Absent is still
+	// not a refusable mistake: it lands where addr, port and line_number
+	// already land, on the documented default.
 	withTempConfig(t)
 
 	w := submitSettings(t, &settingsHandler{}, url.Values{
