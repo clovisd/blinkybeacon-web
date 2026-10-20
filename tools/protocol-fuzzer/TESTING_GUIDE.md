@@ -177,7 +177,7 @@ above tests yield nothing, this is worth adding to the code.
 blinkybeacon-fuzzer.exe sweep 2 07 FF 500
 ```
 
-Long sweep — about 3 minutes. Run it and walk away.
+Long sweep — about 2 minutes. Run it and walk away.
 Values above 0x07 might activate undocumented modes.
 
 ---
