@@ -236,7 +236,7 @@ is already held by a **live** handle is reported in the tray as "cannot be told 
 opened; it is tried again at every enumerate. "Not live" means marked unplugged, or its last
 keepalive attempt failed; there is no age test. A key held by a handle that is not live is a
 **replug**, and the new path takes it over (§12, item 1). Loud, never wrong, and never stuck
-behind a stale handle for longer than one enumerate.
+behind a stale handle for longer than one keepalive period and one enumerate, about 15 s.
 
 **Two ids per beacon.** The string above is the **match key**, internal: it is stored in the
 record (`key`) and used only to recognise a light; it never travels in a URL or a form. Each
@@ -778,8 +778,9 @@ HTTP API   (the existing block, with ?beacon= and GET /beacons added)
   new light's in-memory record `b3`, and its never-saved id, are dropped. In the same `Update`,
   the **open handle, its current light state and its `identifyUntil` move** from the dropped
   record to the surviving one, so Desk right is driven at once, without a replug. The list offers
-  **unplugged** records only. One save through the one writer (D1, §10.5). A Companion button
-  holding `b2` keeps driving Desk right after a port move.
+  **unplugged** records only; when no configured record is unplugged, the row shows no such
+  control. One save through the one writer (D1, §10.5). A Companion button holding `b2` keeps
+  driving Desk right after a port move.
 
 ## 12. Hot-plug and failure
 
@@ -804,11 +805,11 @@ library through the seam in §14.2:
      this goroutine, bind the new one to the record, start its keepalive. This is the macOS replug
      (a new path for the same light); on Windows a replugged light keeps its path, so the "not
      already open" filter above decides first.
-   - key held by a **live** handle → "cannot be told apart", a true twin (in `sn` mode a duplicate
-     serial bought later; in `port` mode a second light Windows gave the same instance segment):
-     the path is not opened and the tray says so. The path is tried again at **every** enumerate,
-     so a stale handle whose keepalive fails in the meantime hands over within one enumerate, at
-     most about 10 s.
+   - key held by a **live** handle → a second light reporting an identity already held: the
+     path is not opened and the tray says so, without naming a cause (in `port` mode two lights
+     present at once never share a key, so the tray cannot know why). The path is tried again at
+     **every** enumerate, so a stale handle whose keepalive fails in the meantime hands over
+     within one keepalive period and one enumerate, about 15 s.
 2. **The unplug callback does two things and nothing else: it marks that beacon unplugged and
    sends its own handle on the manager's channel.** The manager's own goroutine acts only if that
    handle is still the one bound to the record, and closes it; a callback from a handle that a
@@ -1028,8 +1029,10 @@ least two official lines (call them Line A and Line B). Each step says what to l
 10. **Port move.** Quit nothing. Move Desk right to a **different** port. *Expect, if the probe
     found no serial numbers:* `Desk right — Unplugged` stays, and a `New beacon` (`b3`) appears. On
     the settings page the new row offers `This light is: Desk right, moved from its old port`;
-    choose it, Save. *Expect:* one row, `Desk right`, **still `b2`**, in the new port, following B,
-    and spinning at once if B is still paused (no replug needed); `b3` is gone;
+    choose it, Save (the control is there only while some configured beacon is unplugged; a new
+    light found while none is shows no such control). *Expect:* one row, `Desk right`, **still
+    `b2`**, in the new port, following B, and spinning at once if B is still paused (no replug
+    needed); `b3` is gone;
     `curl -X POST http://127.0.0.1:1337/flash?beacon=b2` still flashes it. *If the
     probe found serial numbers:* nothing changes but the port; it is `Desk right` as soon as it is
     found.
