@@ -77,8 +77,9 @@ func iconImage(t *testing.T, b []byte) *image.RGBA {
 	return img
 }
 
-// halfSize is the 16-pixel icon a 100%-scaled Windows tray shows: each 2x2
-// block averaged (image.RGBA is premultiplied, so a plain mean is right).
+// halfSize approximates the 16-pixel icon a 100%-scaled Windows tray shows:
+// each 2x2 block averaged (image.RGBA is premultiplied, so a plain mean is
+// right). Windows' own scaler may differ in detail.
 func halfSize(src *image.RGBA) *image.RGBA {
 	b := src.Bounds()
 	dst := image.NewRGBA(image.Rect(0, 0, b.Dx()/2, b.Dy()/2))

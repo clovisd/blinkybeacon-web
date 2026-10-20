@@ -72,7 +72,7 @@ func sirenIcon(fill color.RGBA) []byte {
 type boundMark int
 
 const (
-	// markSparkle is a violet four-point star, the sign most software now
+	// markSparkle is a violet four-point star, the sign much software now
 	// uses for a smart or automatic feature. It is still a star at 16 px.
 	markSparkle boundMark = iota
 	// markBrain is a pink brain seen from the side. It reads as a brain at
@@ -85,9 +85,9 @@ const boundMarkChoice = markSparkle
 
 // markArt is a mark drawn as rows of pixels: a byte found in pal is painted in
 // that colour, any other byte is left empty. Both marks sit in the bottom-right
-// corner, the one space the siren leaves free, with at least a pixel of gap so
-// the two never run together. They are drawn on whole 2x2 blocks where they
-// can be, so the 16-pixel tray keeps their outline.
+// corner, the one space the siren leaves free, and never share an edge with
+// it, so the two read as separate shapes. Both are solid shapes, nowhere
+// thinner than two pixels, so the 16-pixel tray keeps a solid core of each.
 type markArt struct {
 	x0, y0 int
 	pal    map[byte]color.RGBA
