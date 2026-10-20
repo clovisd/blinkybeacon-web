@@ -67,8 +67,7 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 
 	// Poll AppState every 500ms and sync icon + menu items.
 	go func() {
-		var lastState StateValue
-		var lastConnected bool
+		var lastLook trayLook
 		var lastAddr string
 		lastWatchLabel := "\x00" // force the first render
 		lastBound := "\x00"
@@ -99,35 +98,35 @@ func onTrayReady(state *AppState, listenAddr string, cbs TrayCallbacks) {
 					lastBound = bound
 					mBound.SetTitle(bound)
 				}
-				if sv == lastState && connected == lastConnected {
+				// The icon carries the bound mark exactly when the row above
+				// names a line, so the two always agree.
+				look := trayLook{state: sv, connected: connected, bound: boundRowNamesALine(bound)}
+				if !trayNeedsRedraw(lastLook, look) {
 					continue
 				}
-				lastState, lastConnected = sv, connected
+				lastLook = look
 
+				systray.SetIcon(trayIcon(look))
 				switch {
 				case !connected:
-					systray.SetIcon(iconDisconnected)
 					systray.SetTooltip("BlinkyBeacon — No beacon detected")
 					mStatus.SetTitle("● Beacon: Disconnected")
 					mSpin.Disable()
 					mFlash.Disable()
 					mStop.Disable()
 				case sv == StateSpin:
-					systray.SetIcon(iconSpin)
 					systray.SetTooltip("BlinkyBeacon — Spinning")
 					mStatus.SetTitle("● Beacon: Spinning")
 					mSpin.Disable()
 					mFlash.Enable()
 					mStop.Enable()
 				case sv == StateFlash:
-					systray.SetIcon(iconFlash)
 					systray.SetTooltip("BlinkyBeacon — Flashing")
 					mStatus.SetTitle("● Beacon: Flashing")
 					mSpin.Enable()
 					mFlash.Disable()
 					mStop.Enable()
 				default: // StateIdle, connected
-					systray.SetIcon(iconIdle)
 					systray.SetTooltip("BlinkyBeacon — Idle (beacon ready)")
 					mStatus.SetTitle("● Beacon: Idle")
 					mSpin.Enable()
