@@ -415,8 +415,15 @@ probe's **real** path lines are added as fixtures in T0b, which is when they exi
 to), §14.2 (`Live()` reads an atomic the worker sets), red-team note 3 (`LastAttemptOK` starts
 `true` at open), and one defect the plan review found in today's library: `Close` frees the HID
 device while the keepalive worker may still be running, and the worker's next write (up to 5 s
-later) uses freed memory. `Close` now stops the worker and waits for it first. `OpenFarmBeacon()`
-and the three 10-byte reports are untouched; `cmd/fsbeacon` keeps building.
+later) uses freed memory. `Close` now stops the worker and waits for it first. Two more defects
+of the same family, found while planning and ruled fixed here at the source: a command sent while
+the worker is returning after a failed write blocks its caller for ever (it sends on a `stop`
+nobody will read again), and a command racing a `Close` can write to a closed device. Now no
+library call waits on a worker that has exited or is exiting, and no write touches a closed
+device. `OpenFarmBeacon()` and the three 10-byte reports are untouched; `cmd/fsbeacon` keeps
+building. **Behaviour a caller can see changes in nothing but those three cases:** they no longer
+hang or touch freed memory; a command after `Close` returns an error and the device is not
+touched.
 
 **Departs from the design's §12** (`OpenPath(path string)`): the plan's `OpenPath(info DeviceInfo)`
 takes the whole enumeration record, because the handle must remember what it was opened from
@@ -426,7 +433,7 @@ path alone cannot give that back.
 **Files:**
 - Modify: `pkg/fsbeacon/usbhid.go` (165 lines today)
 - Create: `pkg/fsbeacon/usbhid_darwin.go`
-- Modify: `pkg/fsbeacon/usbhid_test.go` (35 lines: four new tests, one skip made robust)
+- Modify: `pkg/fsbeacon/usbhid_test.go` (35 lines: six new tests, one skip made robust)
 - Modify: `.github/workflows/build.yml:66-69` (the macOS arm64 test step also runs `./pkg/fsbeacon/`)
 
 **Interfaces:**
@@ -482,6 +489,29 @@ type hidDevice interface {
 // keepaliveEvery is the worker's period: the five seconds the game itself
 // resends at. A var so a test can run the worker fast.
 var keepaliveEvery = 5 * time.Second
+
+// errClosed is what every command and write answers after Close.
+var errClosed = errors.New("beacon is closed")
+
+// workerRun is one keepalive run's channels: stop is what Flash, Spin and
+// Stop send on; done is closed when the run returns, on every path (a failed
+// write, a stop, a quit). A new run gets new channels, so nothing can send to
+// a run that is gone.
+type workerRun struct {
+	stop chan bool
+	done chan struct{}
+}
+
+// stopRun asks the current run, if any, to end, and reports whether the run
+// took the request. The send is raced against that run's done and quit, so
+// no caller ever waits on a worker that will not read again. The run is read
+// under runMu, never from a bare field.
+func (beacon *FarmBeacon) stopRun(writeStop bool) (taken bool)
+
+// write is the one place the device is written, the worker's writes
+// included: under the device lock, and never once closed is set, so a write
+// racing Close gets errClosed and the device is not touched.
+func (beacon *FarmBeacon) write(p []byte) (int, error)
 
 // usbhid_darwin.go — LocationID is the IOKit location id of the open device:
 // the USB controller and port, the stable identity of a seat on a Mac.
@@ -627,7 +657,92 @@ func TestFarmBeacon_closeReturnsWhenCalledWhileTheWorkerIsMidWrite(t *testing.T)
 }
 ```
 
-  (`fakeHID` gains `closes int`, counted in `Close`.)
+  (`fakeHID` gains `closes int`, counted in `Close`, and `failOnce bool`: the next write fails.)
+
+```go
+func (d *fakeHID) failNext() { d.mu.Lock(); defer d.mu.Unlock(); d.failOnce = true }
+// and in Write, before counting: if d.failOnce { d.failOnce = false; return 0, errors.New("write failed") }
+
+func TestFarmBeacon_aCommandAfterCloseErrorsAndNeverTouchesTheDevice(t *testing.T) {
+	// (a) A command racing a Close: whichever side wins the device lock, no
+	// write reaches a closed device, and the command reports an error.
+	keepaliveEvery = 2 * time.Millisecond
+	t.Cleanup(func() { keepaliveEvery = 5 * time.Second })
+	dev := &fakeHID{}
+	b := newFarmBeacon(dev, DeviceInfo{})
+	b.StartIdleWorker()
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []func() error{b.Flash, b.Spin, b.Stop} {
+		if err := cmd(); !errors.Is(err, errClosed) {
+			t.Errorf("a command after Close returned %v, want errClosed", err)
+		}
+	}
+	// And raced, many times over, under the race detector.
+	for i := 0; i < 200; i++ {
+		dev := &fakeHID{}
+		b := newFarmBeacon(dev, DeviceInfo{})
+		b.StartIdleWorker()
+		results := make(chan error, 3)
+		go func() { results <- b.Flash() }()
+		go func() { results <- b.Spin() }()
+		go func() { results <- b.Close() }()
+		for j := 0; j < 3; j++ {
+			select {
+			case <-results:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("round %d: a call did not return", i)
+			}
+		}
+		b.Close() // a second Close is harmless; and it waits for any worker a command started
+		dev.mu.Lock()
+		bad := dev.writeAfterClose
+		dev.mu.Unlock()
+		if bad {
+			t.Fatalf("round %d: a write reached the device after Close", i)
+		}
+	}
+}
+
+func TestFarmBeacon_aCommandWhileTheWorkerIsExitingAfterAFailedWriteReturns(t *testing.T) {
+	// (b) The worker's write failed and it is inside OnError, on its way out
+	// and never reading stop again. A command sent now must not wait on it.
+	keepaliveEvery = 2 * time.Millisecond
+	t.Cleanup(func() { keepaliveEvery = 5 * time.Second })
+	dev := &fakeHID{}
+	b := newFarmBeacon(dev, DeviceInfo{})
+	inOnError, release := make(chan struct{}), make(chan struct{})
+	b.OnError = func() { close(inOnError); <-release }
+	b.StartIdleWorker()
+	dev.failNext()
+	<-inOnError // the worker is returning: not at its select, run still registered
+	flashed := make(chan error, 1)
+	go func() { flashed <- b.Flash() }()
+	select {
+	case <-flashed:
+		t.Fatal("Flash returned before the worker had let go: it did not wait for the device lock order")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release) // the worker returns; its run is done
+	select {
+	case err := <-flashed:
+		if err != nil {
+			t.Fatalf("Flash: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Flash hung on a worker that was exiting: the stop send had no reader")
+	}
+	if err := b.Close(); err != nil { // waits for the run Flash started, then closes
+		t.Fatal(err)
+	}
+}
+```
+
+  (In test (b), `Flash` is still blocked after 20 ms because `stopRun` is waiting on the run's
+  `done`, which the worker closes only when it returns from `OnError`; what the test pins is that
+  `Flash` comes back as soon as the run is gone, where today it never does, because today's send
+  waits for a reader that will never come.)
 
   And make the existing hardware test skip on **any** open failure, not one message
   (`usbhid_test.go:11`): replace the `if err.Error() == "No HID devices …"` check with
@@ -642,9 +757,11 @@ func TestFarmBeacon_closeReturnsWhenCalledWhileTheWorkerIsMidWrite(t *testing.T)
   leg. Delete the `close(beacon.quit)` and the `Lock`/`Unlock` pair from `Close`; the first close
   test must fail there on `writeAfterClose` (the worker runs every 2 ms in that test, so the
   freed-device write is immediate, not five seconds away). Replace `close(beacon.quit)` with a
-  non-blocking send on `stop` (`select { case beacon.stop <- false: default: }`); the mid-write test
+  non-blocking send on the run's `stop` (`select { case run.stop <- false: default: }`); the mid-write test
   must fail on its two-second timeout: the send is lost while the worker is inside its write, and
-  the mutex wait never ends.
+  the mutex wait never ends. Delete the `closed` check from `write`; test (a) must fail on
+  `writeAfterClose`. Replace `stopRun`'s `select` with a bare `run.stop <- writeStop`; test (b)
+  must fail on its two-second timeout. Both of those are `df7b274`'s shape.
 
 - [ ] **Step 3: Implement.** In `usbhid.go`:
 
@@ -660,19 +777,27 @@ import (
 type DeviceInfo = hid.DeviceInfo
 
 type FarmBeacon struct {
+	// The worker's life lock, as today: a run holds it from start to return,
+	// so taking it is waiting for the run to be gone.
 	sync.Mutex
-	stop      chan bool
 	hidDevice hidDevice
 	info      DeviceInfo
 	// lastAttemptOK is the result of the keepalive's most recent write. An
 	// atomic so it can be read while the worker holds the mutex above.
 	lastAttemptOK atomic.Bool
-	// quit is closed by Close, once. Every worker selects on it beside its
-	// ticker and stop, so the signal is seen at the worker's next select
+	// run is the current keepalive run's channels, nil between runs; read
+	// and written under runMu only.
+	runMu sync.Mutex
+	run   *workerRun
+	// devMu makes every device write and the close mutually exclusive;
+	// closed, under it, says the device is gone and no write may touch it.
+	devMu  sync.Mutex
+	closed bool
+	// quit is closed by Close, once. Every run selects on it beside its
+	// ticker and stop, so the signal is seen at the run's next select
 	// however busy it was, which a send on the unbuffered stop is not.
 	quit     chan struct{}
 	quitOnce sync.Once
-	closed   bool // the device has been closed; guarded by the mutex
 	OnError  func()
 }
 
@@ -720,20 +845,40 @@ func (beacon *FarmBeacon) Info() DeviceInfo   { return beacon.info }
 func (beacon *FarmBeacon) LastAttemptOK() bool { return beacon.lastAttemptOK.Load() }
 ```
 
-  In `worker`, the ticker is `time.NewTicker(keepaliveEvery)`; the select gains the quit case;
-  record every write's result and keep the flow as it is (the initial write is still not acted
-  on; the ticker's failure still calls `OnError` and returns):
+  The worker, whole: its own run channels, every write through `write`, the quit case, every
+  write's result recorded, and the flow otherwise as today (the initial write is still not acted
+  on; the ticker's failure still calls `OnError` and returns; a stop that asks for it still
+  writes the stop report on the way out):
 
 ```go
+func (beacon *FarmBeacon) worker(magic []byte) {
+	beacon.Mutex.Lock()
+	defer beacon.Mutex.Unlock()
+
+	run := &workerRun{stop: make(chan bool), done: make(chan struct{})}
+	beacon.runMu.Lock()
+	beacon.run = run
+	beacon.runMu.Unlock()
+	defer func() {
+		beacon.runMu.Lock()
+		if beacon.run == run {
+			beacon.run = nil
+		}
+		beacon.runMu.Unlock()
+		close(run.done) // on every path: a failed write, a stop, a quit
+	}()
+
+	ticker := time.NewTicker(keepaliveEvery)
+	defer ticker.Stop()
 	// Set the initial device state
-	_, err := beacon.hidDevice.Write(magic)
+	_, err := beacon.write(magic)
 	beacon.lastAttemptOK.Store(err == nil)
 	for {
 		select {
 		case <-beacon.quit:
-			return // Close is waiting for this worker to let go of the mutex
+			return // Close is waiting for this run to let go of the mutex
 		case <-ticker.C:
-			if _, err := beacon.hidDevice.Write(magic); err != nil {
+			if _, err := beacon.write(magic); err != nil {
 				beacon.lastAttemptOK.Store(false)
 				if beacon.OnError != nil {
 					beacon.OnError()
@@ -741,38 +886,116 @@ func (beacon *FarmBeacon) LastAttemptOK() bool { return beacon.lastAttemptOK.Loa
 				return
 			}
 			beacon.lastAttemptOK.Store(true)
+		case updateHID := <-run.stop:
+			if updateHID {
+				beacon.write(fs22MagicStop)
+			}
+			return
+		}
+	}
+}
 ```
 
   `Close` replaces today's one-liner (`usbhid.go:93-95`):
 
 ```go
 func (beacon *FarmBeacon) Close() error {
-	// Closing quit is seen at the worker's next select however busy it was:
+	// Closing quit is seen at the run's next select however busy it was:
 	// mid-write, inside OnError, or idle. A send on the unbuffered stop
 	// channel would be lost in the first two cases, and the wait below would
 	// then never end. Once, so a second Close is harmless.
 	beacon.quitOnce.Do(func() { close(beacon.quit) })
-	// The worker holds the mutex for its whole life, so taking it means the
-	// worker has exited; with no worker, or one that already returned after
-	// a failed write, the lock is free at once.
+	// The run holds the life mutex from start to return, so taking it means
+	// the run is gone; with no run, or one already returned after a failed
+	// write, the lock is free at once.
 	beacon.Lock()
 	defer beacon.Unlock()
+	// The device lock orders this close against every write, the worker's
+	// included; closed, set under it, turns every later write away.
+	beacon.devMu.Lock()
+	defer beacon.devMu.Unlock()
 	if beacon.closed {
 		return nil
 	}
 	beacon.closed = true
 	return beacon.hidDevice.Close()
 }
+
+func (beacon *FarmBeacon) write(p []byte) (int, error) {
+	beacon.devMu.Lock()
+	defer beacon.devMu.Unlock()
+	if beacon.closed {
+		return 0, errClosed
+	}
+	return beacon.hidDevice.Write(p)
+}
+
+func (beacon *FarmBeacon) stopRun(writeStop bool) (taken bool) {
+	beacon.runMu.Lock()
+	run := beacon.run
+	beacon.runMu.Unlock()
+	if run == nil {
+		return false
+	}
+	select {
+	case run.stop <- writeStop:
+		return true
+	case <-run.done: // the run is returning: nobody will read stop again
+		return false
+	case <-beacon.quit: // Close is under way
+		return false
+	}
+}
+
+// ready: the device's own error state, read under the device lock so it is
+// never asked of a closed device.
+func (beacon *FarmBeacon) ready() error {
+	beacon.devMu.Lock()
+	defer beacon.devMu.Unlock()
+	if beacon.closed {
+		return errClosed
+	}
+	if err := beacon.hidDevice.Error(); err.Error() != "Success" {
+		return err
+	}
+	return nil
+}
+
+func (beacon *FarmBeacon) Flash() (err error) {
+	if err = beacon.ready(); err != nil {
+		return err
+	}
+	beacon.stopRun(false) // a running keepalive ends quietly; an exiting one is not waited for
+	if _, err = beacon.write(fs22MagicFlash); err != nil {
+		return
+	}
+	go beacon.worker(fs22MagicFlash)
+	return
+}
+// Spin is Flash with fs22MagicSpin.
+
+func (beacon *FarmBeacon) Stop() (err error) {
+	if err = beacon.ready(); err != nil {
+		return err
+	}
+	// A run that takes the request writes the stop report on its way out, as
+	// today; a run that is gone, or never was, leaves the write to us.
+	if !beacon.stopRun(true) {
+		if _, err = beacon.write(fs22MagicStop); err != nil {
+			return
+		}
+	}
+	go beacon.worker(fs22MagicStop)
+	return
+}
 ```
 
-  `Flash`, `Spin` and `Stop` keep their blocking send on `stop` (`usbhid.go:104, 122, 141`),
-  unchanged: the worker they stop is at its select or about to be, and they wait for it. Two
-  things about them the plan records and does not fix: they read `beacon.stop` outside the mutex
-  while the worker writes it under it (a data race the race detector would report on a real
-  device; no test here reaches it), and a command issued in the window where the worker is
-  returning after a failed write sends to a channel nobody will read again and hangs its caller
-  (today's behaviour, narrow; the registry's callers are the HTTP handlers, the tray and the
-  loop). Both are for a later library task.
+  What a caller sees is what it saw: the same reports in the same order (`Stop` with a running
+  worker still lets the worker write the stop on its way out; with none it writes itself), the
+  same return values, except in the three cases this task exists for — a `Close` mid-write, a
+  command while the worker is exiting, and a command racing a `Close` — which now return instead
+  of hanging and answer `errClosed` instead of touching a closed device. The bare reads of
+  `beacon.stop` outside the mutex are gone with the field: the run is read under `runMu`.
 
   This also makes today's single-beacon paths safe: `OnQuit` (`main.go:169-170`) calls `Stop()`,
   which starts a fresh worker, and then `Close()`, which freed the device under that worker; and a
@@ -800,15 +1023,19 @@ func (beacon *FarmBeacon) LocationID() (uint32, error) {
   `GOOS=darwin CGO_ENABLED=0 go vet ./pkg/fsbeacon/` is **not** meaningful (cgo off drops the
   package), so the darwin file is checked by the `build` workflow's macOS legs on the pushed
   branch: both green, and the arm64 leg's log shows `ok  …/pkg/fsbeacon` with the hardware test
-  `SKIP` and the four unit tests `PASS` under `-race`. The tray suite on Linux unchanged (`ok`). `go build ./cmd/fsbeacon/` under
+  `SKIP` and the six unit tests `PASS` under `-race`. The tray suite on Linux unchanged (`ok`). `go build ./cmd/fsbeacon/` under
   `GOOS=windows` still builds (the CLI uses `OpenFarmBeacon`).
 
-- [ ] **Step 5: Commit** in two: `fix(fsbeacon): Close stops the keepalive worker and waits for it before freeing the device` and `feat(fsbeacon): enumerate beacons and open one by path; a handle keeps its DeviceInfo and reports its last keepalive result`
+- [ ] **Step 5: Commit** in two: `fix(fsbeacon): Close stops the keepalive worker and waits for it before freeing the device; no call waits on an exiting worker, no write touches a closed device` and `feat(fsbeacon): enumerate beacons and open one by path; a handle keeps its DeviceInfo and reports its last keepalive result`
 
 **Acceptance:**
-- `OpenFarmBeacon`, `Flash`, `Spin`, `Stop`, `StartIdleWorker` and the three report byte strings
-  are unchanged apart from the constructor call and the ticker reading `keepaliveEvery`
-  (`git diff` shows no other hunk in them).
+- `OpenFarmBeacon`, `StartIdleWorker` and the three report byte strings are unchanged apart from
+  the constructor call; `Flash`, `Spin` and `Stop` differ only in going through `stopRun`, `write`
+  and the guarded `ready` (`git diff` shows no other hunk in them).
+- No library call waits on a run that has exited or is exiting (test (b)); no write touches a
+  closed device, and a command after `Close` answers `errClosed` (test (a)); every run has its own
+  `stop`/`done`, and `run` is read under `runMu` only (`grep -n 'beacon.run'` shows every read
+  inside a `runMu` section).
 - `Close` stops a running worker through a closed channel it cannot miss and waits for it before
   closing the device; called while the worker is mid-write it returns once that write has
   finished and no write follows; with no worker, or one already returned, it does not block; a
@@ -819,7 +1046,7 @@ func (beacon *FarmBeacon) LocationID() (uint32, error) {
 - The hardware test skips on any open failure with the error in the skip message.
 - CI: macOS arm64 runs the library's tests; all three build legs green.
 
-**Size:** S (about 100 lines of code, 120 of test, 1 of workflow). **Seat:** `cwd-implementer-opus5`:
+**Size:** M (about 160 lines of code, 220 of test, 1 of workflow). **Seat:** `cwd-implementer-opus5`:
 a third-party API surface, and a close path a mistake in which frees memory under a running
 goroutine.
 
@@ -3518,7 +3745,7 @@ type fakeBusHandle struct {
 	closed          bool // Close was called: the keepalive ends, every write is a defect
 	started         bool // StartIdleWorker was called
 	exited          bool // the keepalive goroutine has returned
-	writeAfterClose bool // a write arrived after Close: on the real library, freed memory
+	writeAfterClose bool // the keepalive's write branch ran after Close: on the real library, freed memory
 	lastOK          atomic.Bool
 	onUnplug        func()
 	kick, ack       chan struct{} // one kick is one keepalive write; ack says it is done
@@ -3583,8 +3810,8 @@ func (h *fakeBusHandle) cmd(s StateValue) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		h.writeAfterClose = true
-		return errors.New("write after close")
+		// The library's answer since T1: an error, and the device untouched.
+		return errors.New("beacon is closed")
 	}
 	if h.dead || h.failNext {
 		h.failNext = false
@@ -3617,6 +3844,9 @@ func (h *fakeBusHandle) keepalive() {
 				h.mu.Unlock()
 				h.ack <- struct{}{}
 				return
+			}
+			if h.closed {
+				h.writeAfterClose = true // cannot happen: quit is seen before any later kick
 			}
 			h.lastOK.Store(true)
 			h.mu.Unlock()
@@ -3655,8 +3885,9 @@ func (b *fakeBus) noWriteAfterClose(t *testing.T) {
 }
 ```
 
-  `lastOK` starts true at open (as the library's does), and a closed handle's keepalive ends and
-  never writes again (as the library's does since T1). The test manager runs `scan()` by hand
+  `lastOK` starts true at open (as the library's does); a closed handle's keepalive ends and
+  never writes again, and a command on a closed handle answers an error without touching
+  anything (both as the library's do since T1). The test manager runs `scan()` by hand
   (no goroutine) and drains `m.dropped` by hand through `drainDropped()`, so every scenario is
   deterministic; one test runs `run(ctx)` with `deviceScanInterval` shortened to prove the loop.
 
@@ -5839,4 +6070,5 @@ this revision applies them. The design changed nowhere in this round.
 | F10 | Minor — "unmatched configured record" had to be judged on the entry's key after the merge | one sentence in `syncConfig`'s doc | T3 Interfaces |
 | F11 | Minor — red-team note 2's scenario has a reachable producer in the plan's own manager (a new-path replug's displaced worker) | `aReplugAtANewPath…` ticks the old keepalive after the hand-over: one delivery on the channel, b1 stays connected, the new handle is not closed; the note's row says so | T5a Step 1, "Where each red-team note landed" row 2, T5a Carries out |
 | F4, follow-up (the master's gate on `d21df9c`, revision 1b) | `Close`'s non-blocking nudge on the unbuffered `stop` channel is lost while the worker is inside a write, and the mutex wait then never ends: `Close` hangs, and the device manager with it | the worker gets a `quit` channel that `Close` closes once (`sync.Once`) and selects on beside its ticker and `stop`, so the signal is seen at its next select however busy it was; `Close` then waits (the mutex) and closes the device once (`closed` flag); no worker or an exited one: no wait. A new test holds the worker inside a write (`blockingHID`), calls `Close` in a goroutine, releases the write, and requires `Close` back within a bound with no write after; it fails on `d21df9c`'s shape on its timeout. The fake's `Close` follows (quit/done). `Flash`/`Spin`/`Stop`'s blocking send and their unlocked read of `stop` are recorded as unchanged | T1 (Produces, Step 1, Step 2, Step 3, acceptance), T5a (the fake) |
+| F4, second follow-up (the master's ruling on revision 1b's two flagged hazards, revision 1c) | (a) a command reads a handle just before the manager closes it and writes to a closed device; (b) a command sent while the worker is returning after a failed write sends on a `stop` nobody reads again and hangs its caller | both fixed in the library, no registry mutex: every run has its own `stop`/`done` (closed on every return path), `stopRun` races the send against `done` and `quit` and reads the run under `runMu`; one device lock with a `closed` flag makes every write (the worker's included) and the close mutually exclusive, a write after `Close` answering `errClosed`; `ready` reads the device's error state under the same lock; tests (a) and (b) with their disarms, both red on `df7b274`; the fake's command on a closed handle answers an error; the caller-visible behaviour is unchanged outside the three cases | T1 (Carries out, Produces, Steps 1–3, acceptance, size), T5a (the fake) |
 | F12 | Minor — departures from the design's signatures were not recorded as departures | "Departs from the design's §n" lines in T1 (`OpenPath(info)`), T3 (`AnyConnectedFollowsALine`), T7 (S14's `trayIcon(trayLook)`, reached through `trayLookFor`; how the call at `tray.go:103` changes; the assumption that S14 has merged) and T0b (the `&000N` rule, taken only from the file); the S14 note names the final hook | T1, T3, T7, T0b |
