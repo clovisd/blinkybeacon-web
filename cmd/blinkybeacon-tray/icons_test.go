@@ -57,6 +57,43 @@ func TestUnboundIcons_areByteIdenticalToV080(t *testing.T) {
 	}
 }
 
+func TestBoundIcons_eachIsItsOwnSirenWithTheChosenMark(t *testing.T) {
+	// The bound icons are what the tray shows; hold each to its own state's
+	// colour and the chosen mark, so a slip between two of them cannot pass.
+	for _, c := range []struct {
+		name string
+		got  []byte
+		fill color.RGBA
+	}{
+		{"idle", iconIdleBound, colourIdle},
+		{"spin", iconSpinBound, colourSpin},
+		{"flash", iconFlashBound, colourFlash},
+	} {
+		if !bytes.Equal(c.got, boundSirenIcon(c.fill, boundMarkChoice)) {
+			t.Errorf("the bound %s icon is not the %s siren with the chosen mark", c.name, c.name)
+		}
+	}
+}
+
+func TestTrayIcons_areAllDifferent(t *testing.T) {
+	// Seven icons, seven looks: no two states may share a picture.
+	icons := []struct {
+		name string
+		b    []byte
+	}{
+		{"disconnected", iconDisconnected},
+		{"idle", iconIdle}, {"spin", iconSpin}, {"flash", iconFlash},
+		{"idle, bound", iconIdleBound}, {"spin, bound", iconSpinBound}, {"flash, bound", iconFlashBound},
+	}
+	for i := range icons {
+		for j := i + 1; j < len(icons); j++ {
+			if bytes.Equal(icons[i].b, icons[j].b) {
+				t.Errorf("the %s and %s icons are the same", icons[i].name, icons[j].name)
+			}
+		}
+	}
+}
+
 // iconImage decodes an icon back to pixels, whatever container this platform's
 // tray wraps it in (see trayIconBytes).
 func iconImage(t *testing.T, b []byte) *image.RGBA {
