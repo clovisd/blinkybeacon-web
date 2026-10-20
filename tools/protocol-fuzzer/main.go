@@ -184,10 +184,10 @@ func cmdSweep(byteStr, startStr, endStr string, holdMs int) {
 	fmt.Println("Press Ctrl+C to stop early.")
 	fmt.Println()
 
-	for v := startVal; v <= endVal; v++ {
+	for v := int(startVal); v <= int(endVal); v++ {
 		payload := make([]byte, 10)
 		copy(payload, base)
-		payload[byteIdx] = v
+		payload[byteIdx] = byte(v)
 
 		_, writeErr := dev.Write(payload)
 		status := "OK  "
@@ -196,9 +196,7 @@ func cmdSweep(byteStr, startStr, endStr string, holdMs int) {
 		}
 		fmt.Printf("  byte[%d]=0x%02X  %s  % 02X\n", byteIdx, v, status, payload)
 
-		if v < endVal {
-			time.Sleep(time.Duration(holdMs) * time.Millisecond)
-		}
+		time.Sleep(time.Duration(holdMs) * time.Millisecond)
 	}
 
 	fmt.Println("\nDone. Sending stop...")

@@ -224,7 +224,7 @@ For each interesting value found, record:
 ## Rebuilding After Changes
 
 If you want to modify the tool (e.g. try different report lengths or add
-feature report support), rebuild from WSL:
+feature report support), rebuild from WSL, starting at the repository root:
 
 ```bash
 cd tools/protocol-fuzzer
