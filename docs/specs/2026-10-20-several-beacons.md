@@ -233,10 +233,10 @@ ports onto one path segment). Mixing the two modes at run time was considered an
 that depends on what else is plugged in changes under the operator's feet. One run-time guard
 stays, for a twin bought later or a second path on a live key: a newly enumerated path whose key
 is already held by a **live** handle is reported in the tray as "cannot be told apart" and is not
-opened; it is tried again at every enumerate. "Live" means not marked unplugged and with a
-keepalive write that succeeded within the last keepalive period; a key held by a handle that is
-not live is a **replug**, and the new path takes it over (§12, item 1). Loud, never wrong, and
-never stuck behind a stale handle.
+opened; it is tried again at every enumerate. "Not live" means marked unplugged, or its last
+keepalive attempt failed; there is no age test. A key held by a handle that is not live is a
+**replug**, and the new path takes it over (§12, item 1). Loud, never wrong, and never stuck
+behind a stale handle for longer than one enumerate.
 
 **Two ids per beacon.** The string above is the **match key**, internal: it is stored in the
 record (`key`) and used only to recognise a light; it never travels in a URL or a form. Each
@@ -561,9 +561,9 @@ handed to another light. `id` is the public id, `key` the match key.
 The ids are loaded with forgiveness of their own, because this file is hand-editable: on load,
 `beacon_seq` becomes `max(beacon_seq, the highest number among the records' ids)`, so a file whose
 counter was edited down, or written by hand without one, cannot hand out an id that is already
-in use; and a record whose `id` is missing, malformed (anything but `b` and digits) or a duplicate
-of an earlier record's is **re-issued** the next id from the counter, with a log line naming the
-old value and the new. T2 tests both.
+in use; and a record whose `id` is missing, malformed (anything but `b` and digits, or digits
+with a leading zero such as `b01`) or a duplicate of an earlier record's is **re-issued** the
+next id from the counter, with a log line naming the old value and the new. T2 tests both.
 
 Per-beacon values load with the same forgiveness as today's top-level ones (`config.go:151-167`):
 a missing or out-of-range number lands on the documented default; an unknown `pause_side` loads
@@ -635,14 +635,18 @@ The design has **one writer**:
 - **The settings POST merges, by public id, against the registry**: the configured records
   plus the in-memory ones of §10.4. Each row carries its record's public id in its field names
   (`b1.name`, §11.2). For a configured id the form's name, lines and light settings replace the
-  record's. For an in-memory id they do the same, and that record becomes configured and is
-  written: this is how naming a new light works (§14.3 step 4). A record in the registry that the
-  form does not mention (a light bound after the page was opened) is **kept** as it is. A row for
-  an in-memory record that has since **vanished** (unplugged before the save) is **ignored**, the
-  rest of the save applies, and the page says so on reload ("Beacon b3 was unplugged before you
-  saved; its row was skipped"). A row for a **configured** id that is gone (a real Forget after the
-  page was opened) **refuses the whole save** with `409` and the sentence "Beacon b2 was forgotten
-  after this page was opened — reopen Settings", and nothing is written. The record's match key,
+  record's. For an in-memory id they do the same, and the record is **promoted** (written) only
+  when its row carries a name, at least one line, or a Take over; otherwise it stays in memory,
+  so a nameless borrowed light is never written by someone else's save. That is how naming a new
+  light works (§14.3 step 4). A record in the registry that the form does not mention (a light
+  bound after the page was opened) is **kept** as it is. The registry keeps **tombstones**, in
+  memory, of the public ids forgotten since the tray started: a row whose id is a tombstone
+  **refuses the whole save** with `409` and the sentence "Beacon b2 was forgotten after this page
+  was opened — reopen Settings", and nothing is written. Any other unknown id is a **vanished**
+  row (a light unplugged before the save): it is **ignored**, the rest of the save applies, and
+  the page says so on reload ("Beacon b3 is no longer listed; its row was skipped"). A Forget
+  before a restart therefore reads as vanished after it, which is safe: the record is gone either
+  way. The record's match key,
   bound state and public id are never on the form and never change through it, **with one
   exception: Take over** (`b3.takeover=b2`, §11.2), which gives the record `b2` the match key of
   the light the row belongs to. So a stale tab can neither undo a bind nor resurrect a forgotten
@@ -737,7 +741,7 @@ Beacons                                     Your dashboard's lines, read just no
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │ ● New beacon                      plugged in · idle                 [Identify]  │
 │   Name  [                     ]   b3 · key port:6&2a1b3c4d&0&0003               │
-│   This light is  [ — ▾ | Desk right, moved from its old port ]                  │
+│   This light is  [ — ▾ | Desk right, moved from its old port ]   (unplugged records only) │
 │   Lines [ ] Line A   [ ] Line B   [ ] Line C                                    │
 │   Draft-End Flash [15] s   New-Lobby Flash [ ] on, [10] s   Spin For Pauses From [Both sides ▾] │
 └─────────────────────────────────────────────────────────────────────────────────┘
@@ -771,8 +775,11 @@ HTTP API   (the existing block, with ?beacon= and GET /beacons added)
 - **Take over** (`b3.takeover=b2`, the control reads "This light is Desk right, moved from its
   old port") treats the **row as the identity and the light as what moved**: the old record `b2`
   keeps its name, public id, lines and light settings and is given the new light's match key; the
-  new light's in-memory record `b3`, and its never-saved id, are dropped. One save through the one
-  writer (D1, §10.5). A Companion button holding `b2` keeps driving Desk right after a port move.
+  new light's in-memory record `b3`, and its never-saved id, are dropped. In the same `Update`,
+  the **open handle, its current light state and its `identifyUntil` move** from the dropped
+  record to the surviving one, so Desk right is driven at once, without a replug. The list offers
+  **unplugged** records only. One save through the one writer (D1, §10.5). A Companion button
+  holding `b2` keeps driving Desk right after a port move.
 
 ## 12. Hot-plug and failure
 
@@ -785,24 +792,28 @@ New: a **device manager** goroutine owning a map `match key → open handle`, ta
 library through the seam in §14.2:
 
 1. Every 10 s (today's cadence, kept): `Enumerate()`. For each path not already open (the
-   manager holds each open handle's path in memory, and nothing persists it): `Open`, read the
-   match key from the handle (`Key()`, §5.3; on macOS that is the location id, read after open),
-   then:
+   manager holds each open handle's path in memory, and nothing persists it): **skip the path if
+   T0 recorded a preferred usage pair and this path's is not it** (§3: a light's second collection
+   is never opened); otherwise `Open`, read the match key from the handle (`Key()`, §5.3; on macOS
+   that is the location id, read after open), then:
    - key not held → bind to the record with that key, or to an unmatched record (§10.2), or
      create an in-memory record (§10.4); `StartIdleWorker()`; register the unplug callback with
      `OnUnplug`.
-   - key held by a handle that is **not live** (marked unplugged, or no keepalive write succeeded
-     within the last keepalive period, 5 s, `pkg/fsbeacon/usbhid.go:70`) → a **replug**: close the
-     old handle on this goroutine, bind the new one to the record, start its keepalive. This is
-     the macOS replug (a new path for the same light) and the Windows replug caught between a
-     successful keepalive and the next failed one.
-   - key held by a **live** handle → "cannot be told apart": the path is not opened and the tray
-     says so (in `sn` mode a twin; in `port` mode a second path for a live key, which is a second
-     collection of the same light unless it is the usage pair T0 prefers). The path is tried again
-     at **every** enumerate, so a stale handle whose keepalive fails in the meantime hands over
-     within one enumerate, at most about 10 s.
+   - key held by a handle that is **not live** (marked unplugged, or its last keepalive attempt
+     failed, read from `LastAttemptOK()`; no age test) → a **replug**: close the old handle on
+     this goroutine, bind the new one to the record, start its keepalive. This is the macOS replug
+     (a new path for the same light); on Windows a replugged light keeps its path, so the "not
+     already open" filter above decides first.
+   - key held by a **live** handle → "cannot be told apart", a true twin (in `sn` mode a duplicate
+     serial bought later; in `port` mode a second light Windows gave the same instance segment):
+     the path is not opened and the tray says so. The path is tried again at **every** enumerate,
+     so a stale handle whose keepalive fails in the meantime hands over within one enumerate, at
+     most about 10 s.
 2. **The unplug callback does two things and nothing else: it marks that beacon unplugged and
-   sends its key on the manager's channel.** The manager's own goroutine closes the handle. The
+   sends its own handle on the manager's channel.** The manager's own goroutine acts only if that
+   handle is still the one bound to the record, and closes it; a callback from a handle that a
+   replug or a Take over has since displaced is **ignored**, so a displaced handle's late failure
+   (up to 5 s after it lost the record) never tears down its successor. The
    callback runs on the library's keepalive goroutine **while that goroutine holds the
    `FarmBeacon` mutex** (`pkg/fsbeacon/usbhid.go:63-66`: the lock is taken for the worker's whole
    life, and `OnError` is called inside it at `:77-80`). A `Stop()` from inside the callback would
@@ -920,8 +931,9 @@ type deviceHandle interface {
     OnUnplug(func())  // registers the callback the keepalive fires on a failed write
                       // (FarmBeacon.OnError, pkg/fsbeacon/usbhid.go:44)
     StartIdleWorker() // pkg/fsbeacon/usbhid.go:155-157
-    Live() bool       // not marked unplugged, and a keepalive write succeeded within the last
-                      // period (§12, item 1); FarmBeacon records its last successful write
+    Live() bool       // not marked unplugged, and the last keepalive attempt succeeded
+                      // (FarmBeacon.LastAttemptOK, an atomic the worker sets after each write
+                      // and nothing reads under the FarmBeacon mutex; §12, item 1)
 }
 ```
 
@@ -934,10 +946,10 @@ existing assertion (`beacon_check.go:10`). The fake, `fakeBus`, is a test type i
   enumeration and makes its open handle's next `Spin`/`Flash`/`Stop` return an error, and fires
   the registered unplug callback **from the fake's own keepalive goroutine while holding the
   fake's mutex**, which every command on the fake also takes (§12, 2). **`unplug` models the
-  stale window:** the handle's last successful keepalive is left where it was, so for one period
-  after the unplug `Live()` is still true and the callback has not fired yet; the test can plug
-  the same key at a new path inside that window (a macOS replug) and see the guard refuse it,
-  then see the next enumerate bind it once the keepalive has failed. `move(portKey, newPortKey)`
+  stale window:** the handle's `LastAttemptOK` stays true until the fake keepalive's next write
+  fails, so inside that window a plug of the same key at a new path (a macOS replug) is refused
+  once and bound at the next enumerate; and **the old handle still fires its callback after the
+  replug**, so the test sees the manager ignore a displaced handle's callback. `move(portKey, newPortKey)`
   is an unplug then a plug with the same serial and a new port; `failNext(portKey)` makes one
   command fail without unplugging, for the "one beacon failing" case.
 - Each fake handle counts commands, as `countingBeacon` does, and records the order they came in.
@@ -960,9 +972,11 @@ changes, **except in `state_test.go`**: its four tests are about `AppState`'s si
 Scenarios the suite pins: three beacons bound to three records; unplug one and the other two keep
 their state and take their next commands; replug and the record re-binds and the wanted state is
 re-applied (a pause resumes spinning); a port move yields one unplugged record and one new
-unassigned beacon, and Take over gives the old record the new key and drops the new one's
-in-memory record; a replug at a new path inside the stale window is refused once and bound at
-the next enumerate; a first-seen beacon follows nothing and is driven by a bodiless `POST /spin`,
+unassigned beacon, and Take over gives the old record the new key, moves the open handle, its
+state and `identifyUntil` to it, and drops the new one's in-memory record; a replug at a new path
+inside the stale window is refused once and bound at the next enumerate, and the displaced
+handle's late callback is ignored; a nameless in-memory row is not written by a save, a named one
+is; a first-seen beacon follows nothing and is driven by a bodiless `POST /spin`,
 and naming it on the settings page saves it; a row for a light that vanished before the save is
 skipped while the rest of the save applies; an unmatched v0.8.0 record binds to the first light and the config is
 saved with its key, without an HTTP restart; a settings save from a page opened before that bind
@@ -1014,8 +1028,9 @@ least two official lines (call them Line A and Line B). Each step says what to l
 10. **Port move.** Quit nothing. Move Desk right to a **different** port. *Expect, if the probe
     found no serial numbers:* `Desk right — Unplugged` stays, and a `New beacon` (`b3`) appears. On
     the settings page the new row offers `This light is: Desk right, moved from its old port`;
-    choose it, Save. *Expect:* one row, `Desk right`, **still `b2`**, in the new port, following B;
-    `b3` is gone; `curl -X POST http://127.0.0.1:1337/flash?beacon=b2` still flashes it. *If the
+    choose it, Save. *Expect:* one row, `Desk right`, **still `b2`**, in the new port, following B,
+    and spinning at once if B is still paused (no replug needed); `b3` is gone;
+    `curl -X POST http://127.0.0.1:1337/flash?beacon=b2` still flashes it. *If the
     probe found serial numbers:* nothing changes but the port; it is `Desk right` as soon as it is
     found.
 11. **A third light, never configured.** Plug in the third. *Expect:* `New beacon`, follows
@@ -1043,14 +1058,14 @@ which.
 | # | Task | Touches | Tested by | Marks |
 |---|---|---|---|---|
 | T0 | **Fix the identity mode from the probe's file.** One constant (`sn` or `port`), `matchKey(info, dev)` with the Windows and macOS port-key functions, and the collection rule (§3: the usage pair to open when a light shows two paths). Stops on `MIXED`, `DUPLICATED` or a port-key collision (§5.3). | new `beacon_key.go`, `beacon_key_windows.go`, `beacon_key_darwin.go` | table test over sample paths and location ids, both modes; the probe's own lines as fixtures; two paths with one instance segment yield one key | parser (of the path) |
-| T1 | **Library: enumerate and open by path.** `fsbeacon.Enumerate()`, `fsbeacon.OpenPath()`, `FarmBeacon.Info()`, `LastWrite()` (the time of the last successful keepalive write, for `Live()`), `LocationID()` on macOS; `OpenFarmBeacon()` unchanged. | `pkg/fsbeacon/usbhid.go` (+ a darwin file) | `go vet` under `GOOS=windows` and `darwin` via CI; `beacon_check.go`'s compile-time assertion; the existing hardware test | third-party API |
-| T2 | **Config: the `beacons` list, public ids, migration, mirror, and the one writer.** §10.1–10.2, §10.5, D5. `configStore` with `Get`/`Update`; `beacon_seq`. | `config.go`, new `config_store.go`, `config_test.go`, `main.go` (`getCfg`/`restartCh` move onto the store) | load of a v0.5.0, v0.7.0 and v0.8.0 file each yields one unmatched `b1` with the right values; save-then-load round trip; mirror keys written from `beacons[0]`; `beacon_seq` only ever rises and is raised to the highest id on load; a missing, malformed or duplicate `id` is re-issued and logged; forgiveness per field; an `Update` that changes neither `addr` nor `port` triggers no restart; **read-only smoke on the real-shape fixtures with omitted keys** | parser |
+| T1 | **Library: enumerate and open by path.** `fsbeacon.Enumerate()`, `fsbeacon.OpenPath()`, `FarmBeacon.Info()`, `LastAttemptOK()` (an atomic bool the worker sets after each keepalive write, for `Live()`; never read under the mutex), `LocationID()` on macOS; `OpenFarmBeacon()` unchanged. | `pkg/fsbeacon/usbhid.go` (+ a darwin file) | `go vet` under `GOOS=windows` and `darwin` via CI; `beacon_check.go`'s compile-time assertion; the existing hardware test | third-party API |
+| T2 | **Config: the `beacons` list, public ids, migration, mirror, and the one writer.** §10.1–10.2, §10.5, D5. `configStore` with `Get`/`Update`; `beacon_seq`. | `config.go`, new `config_store.go`, `config_test.go`, `main.go` (`getCfg`/`restartCh` move onto the store) | load of a v0.5.0, v0.7.0 and v0.8.0 file each yields one unmatched `b1` with the right values; save-then-load round trip; mirror keys written from `beacons[0]`; `beacon_seq` only ever rises and is raised to the highest id on load; a missing, malformed (`b01` included) or duplicate `id` is re-issued and logged; forgiveness per field; an `Update` that changes neither `addr` nor `port` triggers no restart; **read-only smoke on the real-shape fixtures with omitted keys** | parser |
 | T3 | **The beacon registry and the aggregate.** Records, handles, per-beacon state, `identifyUntil`; `aggregateState`, `aggregateConnected` (§9.2). Replaces `AppState`'s single beacon. | `state.go` → `beacons.go`, `state_test.go` | property test: for every multiset of up to six beacon states, the aggregate equals the rank maximum; connected = any; **pinned values: the §9.2 table**; the existing `state_test.go` cases ported | numeric |
 | T4 | **Per-pair watchers, the combine, and the 429 backoff.** §7; the loop's fan-out and the per-line throttle (§8.1). `Watcher` unchanged. | `watch_loop.go`, `watcher.go` (`pollFailureStatus` gains 429, `WatchThrottled`, the `Retry-After` reader), new `combine.go`, tests | the §7.2 table, rows 1–10, pinned; property sweep over all 3^6 answer combinations; deadlines (rows 4, 7); **"pause lifts inside the flash window → flash resumes" pinned on one pair** (row 7, today's `Decide`); the 401 backoff shared and the 404 per line; a 429 backs off that line only, honours `Retry-After` in seconds and as a date, caps at 30 s, defaults to 10 s; a 503 stays `lost` at full cadence; one fetch per distinct line (count on the stub) | numeric |
-| T5 | **The device manager with the fake bus.** §12, §14.2: `deviceSource`, `deviceHandle`, `farmSource`/`farmHandle`, the manager goroutine and its close channel. | `main.go` (the USB goroutine), new `devices.go`, `devices_farm.go` (windows ‖ darwin), `beacon_check.go`, `fakebus_test.go`, the ~35 setup lines listed in §14.2 | the §14.2 scenarios, the stale-window replug included; the "one fails, two go on" case; **the deadlock guard: a close from inside the unplug callback fails the test on its two-second timeout** | third-party API |
+| T5 | **The device manager with the fake bus.** §12, §14.2: `deviceSource`, `deviceHandle`, `farmSource`/`farmHandle`, the manager goroutine and its close channel. | `main.go` (the USB goroutine), new `devices.go`, `devices_farm.go` (windows ‖ darwin), `beacon_check.go`, `fakebus_test.go`, the ~35 setup lines listed in §14.2 | the §14.2 scenarios, the stale-window replug, the ignored displaced-handle callback and the skipped second-collection path included; the "one fails, two go on" case; **the deadlock guard: a close from inside the unplug callback fails the test on its two-second timeout** | third-party API |
 | T6 | **HTTP: `?beacon=`, `GET /beacons`, the aggregate `/status`.** §9. | `server.go`, `server_test.go`, the API block in `settings_handler.go:86-106` | **every existing `server_test.go` assertion holds, with its setup line changed as §14.2 says**; every row of the §9.1 reply table, the 400 and the three 503s included; `/beacons` shape golden; `/status` ignores `?beacon=`; 404 or 400 before any command on a mixed call; a percent-encoded name resolves | HTTP contract |
 | T7 | **The tray menu and icon.** §11.1 (eight root-level slots before the separator and Quit, the ordering rule), the S14 hook. | `tray.go`, `icons.go`, new `tray_slots.go` with its fake-menu test | the label functions table-tested as today's are; the slot logic unit-tested on a fake menu that **models Windows (an update to a hidden item makes it visible at its id-sorted position; `Show`/`Hide` move it in and out of that position)**, failing on any update to a hidden slot outside the tick that shows it and on any visible slot out of creation order, over plug/unplug/forget/replug sequences; the rest by hand (§14.3, T10) | — |
-| T8 | **The settings page.** §11.2, the merge (§10.5). | `settings_handler.go`, `settings_handler_test.go` | form round trip for two beacons; fields keyed by public id; duplicate name refused; a name that reads as a public id refused; names escaped; the merge against the registry: naming a new light saves it, a record bound after the page loaded survives the save, a row for a light that vanished is skipped and the rest applies, a row for a forgotten configured id refuses the save with 409 and writes nothing; Identify and Forget act by public id without saving the form, and refuse a gone id with 409; Take over keeps the old record's public id and drops the new light's; `slowed by the dashboard` as the line list's fourth reason; the line checkboxes from the cached list and the comma-separated fallback; CSRF on every action | — |
+| T8 | **The settings page.** §11.2, the merge (§10.5). | `settings_handler.go`, `settings_handler_test.go` | form round trip for two beacons; fields keyed by public id; duplicate name refused; a name that reads as a public id refused; names escaped; the merge against the registry: naming a new light saves it, a nameless in-memory row is not written, a record bound after the page loaded survives the save, a row for a light that vanished is skipped and the rest applies, a row for a tombstoned id refuses the save with 409 and writes nothing; Identify and Forget act by public id without saving the form, and refuse a gone id with 409; Take over keeps the old record's public id, moves the handle and state, drops the new light's record, and is offered for unplugged records only; `slowed by the dashboard` as the line list's fourth reason; the line checkboxes from the cached list and the comma-separated fallback; CSRF on every action | — |
 | T9 | **Docs.** `BEACON-DASHBOARD.md` §1, §2 (the picker is now per beacon), §4, §5 (the tray rows), §7 (the config sample; **correct lines 351-354 to what the code does: a pause that lifts inside the flash window hands the light back to the flash**), §8 (drop "only one line at a time"); README's API block; the settings page's API text. | docs | a reviewer reads them against the shipped behaviour, step by step with §14.3 | — |
 | T10 | **Hands-on and CI.** §14.3 on the owner's lights, plus one check on real Windows that a hidden beacon slot re-shows with its children intact; the `build` workflow green for Windows and both macOS legs. | — | the owner's report; the artifacts listed | — |
 
@@ -1136,3 +1151,19 @@ revision itself. The master ruled all in; applied as below.
 | N4 | On a macOS replug (a new path for the same light) the `sn`-mode guard would fire against the stale handle during its 5 s keepalive window; no retry was specified; port mode's second handle was unaddressed. | A key held by a handle marked unplugged, or whose keepalive has not succeeded within the last period, is a replug: close the old handle, bind the new one. The guard fires only against a live handle. A refused path is retried at every enumerate. The same rule covers port mode. The fake's `unplug` models the stale window. | §5.3 (the guard); §12 (item 1, three cases); §14.2 (`Live()` on the handle; `unplug`; scenarios); T1 (`LastWrite()`); T5 |
 | N5 | No loader forgiveness for `beacon_seq` or a duplicate or malformed `id`. | On load, `beacon_seq = max(beacon_seq, highest id number)`; a duplicate or malformed `id` is re-issued from the counter and logged. T2 tests both. | §10.1; T2 |
 | N6 | (a) "never stored" path; (b) the probe's tiebreak when both writes succeed; (c) "no test's expectation changes" versus `state_test.go` rewritten; (d) no 429 word for the settings page's line-list fetch. | (a) a path is never persisted, held in memory for open handles; (b) step 4 asks which light flashed for each `beacon N`, and the tiebreak uses that answer; (c) the contradiction removed; (d) `slowed by the dashboard` beside the three existing reasons. | (a) §12 item 1, §13, §14.2 (`deviceInfo`); (b) §3 (the HID-path row), §14.1 step 4; (c) §14.2; (d) §11.2, T8 |
+
+### Re-check of revision 2 (`a17e555`)
+
+The red team re-checked revision 2: N1–N6 and F6 resolved, and seven gaps in the new mechanisms.
+The master ruled all in; this was the last design round, so each is closed with the smallest
+wording.
+
+| # | Finding | Ruling | Where the text changed |
+|---|---|---|---|
+| R1 | Take over re-keyed the record but left the open handle bound to the dropped record, so step 10 failed until a replug. | In the same `Update`, the open handle, its light state and `identifyUntil` move to the surviving record. | §11.2 (Take over); §14.2 scenarios; §14.3 step 10; T8 |
+| R2 | The replug test "no keepalive within 5 s" was phase-locked with the 10 s enumerate and could close a healthy light; the Windows clause was unreachable; `LastWrite` under the mutex was the F12 trap. | "Not live" means marked unplugged, or the last keepalive attempt failed; no age test; recovery is the retry at every enumerate. The Windows clause dropped. The result is read from an atomic, `LastAttemptOK()`, never under the mutex. | §5.3; §12 item 1; §14.2 (`Live()`, `unplug`); T1 |
+| R3 | The close channel was keyed by match key, so a displaced handle's late callback could tear down its successor. | The callback carries its own handle; the manager acts only if it is still the one bound; a stale callback is ignored. The fake's old handle fires after a replug so T5 sees it. | §12 item 2; §14.2 (`unplug`, scenarios); T5 |
+| R4 | §12 opened second-collection paths that §3 said to skip, a permanent false "cannot be told apart". | Before `Open`, skip any path whose usage pair is not the one T0 prefers; the guard then sees only true twins. | §12 item 1; T5 |
+| R5 | Any save promoted every in-memory row, writing nameless records and breaking "a borrowed light leaves no record". | An in-memory row is written only when it carries a name, at least one line, or a Take over. | §10.5; §14.2 scenarios; T8 |
+| R6 | Ignore-versus-409 needed to tell a forgotten id from a vanished one, with no data for it. | Tombstones, in memory, of the ids forgotten since start: a tombstone refuses with 409; any other unknown id is a vanished row, ignored. A Forget before a restart reads as vanished afterwards, which is safe. | §10.5; T8 |
+| R7 | (a) the Take over list; (b) the vanished-row wording; (c) `b01`. | (a) offered only for unplugged records; (b) "is no longer listed"; (c) a leading-zero id is malformed, re-issued and logged. | §11.2; §10.5; §10.1; T2, T8 |
