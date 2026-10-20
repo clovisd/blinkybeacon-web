@@ -68,6 +68,12 @@ func runSignalCase(t *testing.T, c string) {
 		wait()
 		close(done)
 	}()
+	// Nothing has been signalled yet, so the wait must still be waiting.
+	select {
+	case <-done:
+		t.Fatal("returned before any signal")
+	case <-time.After(50 * time.Millisecond):
+	}
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	deadline := time.After(5 * time.Second)

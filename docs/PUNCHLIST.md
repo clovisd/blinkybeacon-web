@@ -75,5 +75,5 @@ Real, known, and deliberately not queued: each one is told to users or recorded 
 - The settings page asks the dashboard for its line list at most once per 5 s, failures included — `a6f8027` (dashboard-v0.8.0), 2026-10-02.
 - Once-per-match draft flash, tested through the real loop: one flash per match, re-armed by the next — `a6f8027` (dashboard-v0.8.0), 2026-10-02.
 - A settings save without a light setting — unreachable: every save mints a new form token, so an older tab's form is refused; pinned by a test — `a6f8027` (dashboard-v0.8.0), 2026-10-02.
-- go vet under GOOS=windows is clean on upstream `cmd/fsbeacon/commands/root.go`: both `os.Signal` channels hold one signal, so `./...` vets clean; a test pins that Ctrl-C and SIGTERM still end both waits — v0.4.1, 2026-10-20.
+- go vet under GOOS=windows is clean on upstream `cmd/fsbeacon/commands/root.go`: both `os.Signal` channels hold one signal, so `./...` vets clean; a test run by hand on Linux with libudev headers (no gate runs it) checks that Ctrl-C and SIGTERM still end both waits — v0.4.1, 2026-10-20.
 - `tools/protocol-fuzzer` (the tool and its testing guide) re-committed under the owner's name from `9cdd613` on `origin/protocol-fuzzer`, its guide's rebuild path and report-length test corrected; the branch stays — v0.4.1, 2026-10-20.
