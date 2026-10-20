@@ -34,6 +34,8 @@ physical light the row is.
 - A beacon that follows **several lines** lights for any of them: a pause on any of its lines spins
   it, a draft ending on any of its lines flashes it. When its lines disagree, the busier state
   wins, in the order the app already uses for one line: **spinning beats flashing beats dark**.
+  A pause that lifts while a flash still has time left hands the light back to the flash for what
+  is left, as the app does today for one line.
 - A beacon that follows **no line** is yours to drive by hand from the tray menu or the HTTP
   routes, exactly like an unbound tray today.
 - A light you plug in for the first time shows up as a new beacon that follows nothing, so it never
@@ -44,7 +46,8 @@ and Identify. The top-level Spin, Flash and Stop stay and drive every beacon, as
 module's buttons do. The tray icon shows the busiest light.
 
 The HTTP routes the Companion module uses keep their paths and replies. `POST /spin`, `/flash`
-and `/stop` with nothing more drive every beacon; with `?beacon=<id>` they drive one. `GET
+and `/stop` with nothing more drive every beacon; with `?beacon=b1` (the short id the tray gives
+each beacon, or its name) they drive one. `GET
 /status` keeps answering `{"state", "connected"}`, now for the beacons as a whole. One new route,
 `GET /beacons`, lists them with ids, names and states, so the module's beacon picker (S17) and
 any script can find out what is plugged in.
@@ -65,8 +68,13 @@ and the old row shows "unplugged".
   light appears as a new beacon that follows nothing; on the settings page the new row offers
   "Take over the settings of: Desk left" in one click. Predictable, and never wrong.
 - Alternative: the tray guesses. When exactly one row is unplugged and exactly one new light
-  appears, it re-binds the row to the new light by itself. Convenient, and silently wrong the
-  moment two lights are swapped between two ports.
+  appears, it re-binds the row to the new light by itself. Convenient, and wrong in the one case
+  it cannot see: Desk right is unplugged in a drawer, a borrowed light goes into a fresh port, and
+  the guess hands the borrowed light Desk right's lines, which is exactly what §10.4 promises never
+  happens to a light nobody assigned.
+- A swap of two lights between two ports behaves the same under both options: in port mode each
+  port's row matches whatever light sits in it, so nothing is unplugged, nothing is new, and there
+  is nothing to guess. The two lights trade names; Identify tells them apart.
 - If the probe finds distinct serial numbers, this decision is moot: the light carries its
   identity with it, and a port move changes nothing.
 
@@ -92,22 +100,29 @@ that `/status` stays open when the token lands (2026-10-20, answer 4).
   it is workable but one more thing to get right at setup.
 
 **D4 · The tray menu: one submenu per beacon, or a flat list.**
-- **Recommended: a submenu per beacon** ("Desk left — Spinning (Line A, Line C) ▸" opening to
-  its status, its lines, Spin, Flash, Stop, Identify), under the top-level Spin, Flash and Stop that
-  drive every beacon. The menu library supports submenus and can show or hide items, but cannot
-  insert one above an existing item, so the tray pre-creates eight hidden beacon submenus at
-  start and shows them as beacons appear (§11.1). Eight beacons is the menu's limit, not the
-  app's.
-- Alternative: a flat list, "Desk left: Spin / Desk left: Flash / …" for every beacon. No submenu
-  clicks, but fifteen rows for three beacons, and the same eight-slot pre-creation.
+- **Recommended: a submenu per beacon**, inside one `Beacons ▸` entry under the top-level Spin,
+  Flash and Stop that drive every beacon ("Desk left — Spinning · Line A, Line C ▸" opening to its
+  status, its lines, Spin, Flash, Stop, Identify). The menu library supports submenus and can show
+  or hide items, but anything it shows lands at the bottom of its parent: a beacon entry at the
+  root level, shown after start, would sit below Quit. Inside one `Beacons` entry the only things
+  it can land below are other beacons, so the tray pre-creates eight hidden beacon submenus there
+  and shows them as beacons appear, in order of appearance (§11.1 has the rule). Eight beacons is
+  the menu's limit, not the app's.
+- Alternative: a flat list inside `Beacons ▸`, "Desk left: Spin / Desk left: Flash / …" for every
+  beacon. One level fewer to click, but fifteen rows for three beacons, and the same eight-slot
+  pre-creation and ordering rule.
 
 **D5 · Keep the old one-beacon keys in the config file, mirrored from the first beacon.** The new
 file holds a `beacons` list (§10.1). The old top-level keys (`line_number`, `flash_seconds`,
 `lobby_flash`, `lobby_flash_seconds`, `pause_side`) can either stay, written from the first beacon
 on every save, or go.
 - **Recommended: keep them, mirrored.** A `dashboard-v0.8.0` build pointed at the new file then
-  still runs the first beacon on its line, so going back a release after trying this one costs
-  nothing. The cost is five redundant keys in a file few people open.
+  still runs the first beacon on its line, so going back a release after trying this one keeps
+  that one light working. The real cost of a downgrade stays: the older build's Save writes its
+  own keys only (`settings_handler.go:311-322`), so the first time Save is pressed there the
+  `beacons` list is gone, and the other beacons' names, lines and settings with it; they come
+  back only from a copy of the file. The mirror buys a working first beacon, not a round trip.
+  The price is five redundant keys in a file few people open.
 - Alternative: drop them. A cleaner file; a downgrade reads `line_number` as missing and binds the
   beacon to line 1.
 
@@ -115,10 +130,12 @@ on every save, or go.
 
 | Unknown | Why it matters | Settled by |
 |---|---|---|
-| **Does this light report a USB serial number, and is it distinct per unit?** | Decides what a beacon's identity is (§5.3): a serial travels with the light; without one the port is the identity, and D1 applies. Some cheap devices report the same serial on every unit, which is as good as none. | Probe step 2: the `summary` block says `DISTINCT`, `NONE`, `MIXED` or `DUPLICATED`. |
+| **Does this light report a USB serial number, and is it distinct per unit?** | Decides what a beacon's identity is (§5.3): a serial travels with the light; without one the port is the identity, and D1 applies. A serial **duplicated** across units is worse than none: Windows builds the device's instance id from the serial the light reports (`hid_windows.c:508-535`), so two such lights get the same path segment whatever ports they are in, and neither the serial nor the port can tell them apart. | Probe step 2: the `summary` block says `DISTINCT`, `NONE`, `MIXED` or `DUPLICATED`. `DISTINCT` → serial mode; `NONE` → port mode; **`MIXED` or `DUPLICATED` → stop**: the build does not pick a mode, and the probe file comes back to this design (§5.3, §14.1). |
+| **Is one light one HID path?** A device with several top-level collections shows one path per collection on Windows, all sharing the instance segment and differing in usage page and usage. | Two paths for one light must not become two beacons, and the tray must open the one that takes the command. | Probe step 2: two `beacon N` entries with the same `port key` and **different** `usage page / usage` lines are one light with two collections; the same `port key` **and** the same usage pair are two lights Windows cannot tell apart (a duplicated serial: stop, as above). Step 4 confirms it: one light flashing twice in a row, or its second path saying `write FAILED`. If a light shows two paths, the match key is the shared instance segment, and the build opens, per key, the first path in enumeration order whose write succeeded in the probe (T0 records the usage pair to prefer). |
 | **Does the Windows path stay the same across a reboot, and change across a port move?** | The port-as-seat rule (§5.3) rests on Windows building a serial-less device's instance id from the hub and port. Read from Windows' own documentation, not measured here. | Probe steps 2 and 3: compare `port key` before and after the move; the owner may also run step 2 again after a reboot. |
 | **Can several beacons with the same vendor and product id be held open at once, and does writing to one path light only that light?** | Upstream's library header says it *"cannot differentiate between multiple beacons … due to a hardware limitation"* (`pkg/fsbeacon/usbhid.go:3`). Everything in `hidapi` says paths are per device interface and opening by path is exact (§5.1); the comment most likely means "no serial number", but the lights have to show it. | Probe step 4: `-flash` opens every beacon and holds them open together, then flashes each in turn naming it. One light at a time flashing, in order, settles it. If more than one light flashes at once, **stop and report**: that is the kickoff's first halt condition. |
 | **macOS** — whether the location id is stable across replug and reboot, and whether several lights open cleanly through IOKit. | §13. No Mac with a light exists (`docs/PUNCHLIST.md:30`, owner: "not now"). | Unmeasurable until a Mac and a light meet. The probe builds on macOS (its `extra_darwin.go` prints the location id); that file compiled nowhere in this session, so it is unverified. |
+| **macOS: does opening the light trip a permission prompt?** Input Monitoring is asked for keyboards and mice; whether this HID device counts is unknown, and the app has never been run against a light on a Mac. | A prompt at first start is a setup step the guide would have to name; a silent refusal is a dark light. | The first Mac run, with the punchlist's macOS item (`docs/PUNCHLIST.md:30`). The probe does not settle it. |
 | **How fast `hid.Enumerate` is on Windows with a dozen HID devices present.** | Sets how often the tray can look for newly plugged lights (§12). `hidapi` opens every HID interface on the system read-only to read its vendor id (`hid_windows.c:806-864`). | The design keeps today's 10-second retry as the look-up cadence, so nothing rests on it. A later tuning can measure it with the probe's timing. |
 
 ## 4. The owner's hands-on steps, in short
@@ -130,7 +147,9 @@ probe first:
    light it holds every five seconds, which would fight the probe's flash (and on a Mac it holds
    each light exclusively, so the probe could not open them at all).
 2. Run `beacon-probe.exe` (double-click is fine). Send back the `beacon-probe.txt` it writes
-   beside itself.
+   beside itself. If its summary says `DUPLICATED` or `MIXED`, or two beacons show the same
+   `port key` with the same usage, send the file and stop there: the design has to be revisited
+   before anything is built.
 3. Move one beacon to another USB port and run it again. Same file, appended.
 4. Run `beacon-probe.exe -flash` to see which light is which.
 
@@ -197,7 +216,7 @@ Serial numbers come from `kIOHIDSerialNumberKey` (`hid_darwin.c:410-412`).
 
 ### 5.3 The identity rule
 
-A beacon's **id** is a string with a prefix saying what kind it is:
+A beacon's **match key** is a string with a prefix saying what kind it is:
 
 - `sn:<serial>` when the light reports a serial number, **and** the probe showed the owner's
   units report distinct ones. The light keeps its identity in any port, on any PC.
@@ -205,18 +224,33 @@ A beacon's **id** is a string with a prefix saying what kind it is:
   (`6&2a1b3c4d&0&0000`); on macOS it is the location id in hex (`0x14200000`). The port is the
   seat: whatever light sits in it is that beacon (D1).
 
-**The build picks one mode from the probe's file and fixes it as a constant** (task T0, §15).
-Mixing the two at run time was considered and refused: an id that depends on what else is plugged
-in (serial when unique, port when a twin appears) changes under the operator's feet. In `sn` mode,
-a second connected light reporting the same serial as a first is reported in the tray as "cannot be
-told apart" and is not opened: loud, never wrong.
+**The build picks one mode from the probe's file and fixes it as a constant** (task T0, §15):
+`DISTINCT` → `sn`; `NONE` → `port`. **`MIXED` or `DUPLICATED` is a stop**, and so is a file in
+which two entries share a `port key` with the same usage page and usage (§3): the build does not
+pick a mode, and the master brings the probe file back to this design, because a light Windows
+cannot tell apart from its twin has no identity this design can give it (`hid_windows.c:508-535`:
+the instance id is built from the serial the light reports, so a duplicated serial collapses two
+ports onto one path segment). Mixing the two modes at run time was considered and refused: a key
+that depends on what else is plugged in changes under the operator's feet. One run-time guard
+stays in `sn` mode, for a twin bought later: a second connected light whose key is already held
+by an open handle is reported in the tray as "cannot be told apart" and is not opened. Loud, never
+wrong.
+
+**Two ids per beacon.** The string above is the **match key**, internal: it is stored in the
+record (`key`) and used only to recognise a light; it never travels in a URL or a form. Each
+record also gets a **public id**: `b` and a number (`b1`, `b2`, …), assigned by the tray from a
+counter in the config file (`beacon_seq`, §10.1) and **never reused** after a Forget. The public
+id is what travels in `?beacon=`, `GET /beacons`, the settings form and the Companion picker; it
+is lowercase letters and digits only, so it needs no encoding anywhere.
 
 ### 5.4 Naming, and finding out which light is which
 
 - The operator names a beacon on the settings page (§11.2). Names are free text, trimmed, 1–40
   characters, unique among the configured beacons (the save refuses a duplicate by name), and
-  shown everywhere the beacon is mentioned: tray, settings, logs, `GET /beacons`. A beacon that
-  has not been named shows as `New beacon` with its id beside it.
+  shown everywhere the beacon is mentioned: tray, settings, logs, `GET /beacons`. A name that
+  would read as a public id (`b` followed only by digits, in any case, after trimming) is refused
+  at save, so a `?beacon=` value is never ambiguous. A beacon that has not been named shows as
+  `New beacon` with its public id beside it (`b3`).
 - **Identify** flashes one beacon for two seconds and then returns it to whatever it was doing.
   It is a per-beacon **override with a deadline** (§7.3), the same shape as the watcher's own
   flash deadline, so a beacon spinning for a pause flashes for two seconds and goes back to
@@ -232,7 +266,8 @@ told apart" and is not opened: loud, never wrong.
 
 ```
 Beacon
-  id        string        "sn:…" or "port:…" (§5.3); "" for a record not yet matched to hardware (§10.2)
+  id        string        the public id, "b1", "b2", … (§5.3): assigned from beacon_seq, never reused
+  key       string        the match key, "sn:…" or "port:…" (§5.3); "" for a record not yet matched to hardware (§10.2)
   name      string        the operator's; "" until named ("Beacon 1" for the record migrated from an old file, §10.2)
   lines     []int         zero or more dashboard line numbers (the N in /api/v0/lines/N)
   light     LightSettings flash_seconds · lobby_flash · lobby_flash_seconds · pause_side
@@ -279,7 +314,7 @@ beacons on one line can flash for different lengths.
 The alternative, splitting `Watcher` into a per-line detector emitting events and a per-beacon
 policy, is cleaner on paper and a rewrite of the most-tested file in the tray
 (`watcher_test.go`, 1,328 lines; `watch_loop_test.go`, 1,574 lines). Refused for this stage; the
-pair-watcher reuses every test as it is.
+pair-watcher reuses every `Decide` test as it is (what changes in the loop tests is in §14.2).
 
 ### 7.2 The rule when a beacon's lines disagree
 
@@ -306,9 +341,13 @@ the result equals the rank maximum. The sweep covers all 3^6 combinations rather
 rows above, which are the pinned values.
 
 Once-per-match guards: in row 2, line B's draft-end flash is **spent** (its guard set) even though
-the light showed spin, exactly as it is today when a pause lands during a flash: "does not go back
-to flashing when the pause lifts" (`BEACON-DASHBOARD.md:351-354`). Nothing about the guards
-changes.
+the light showed spin, and B's deadline keeps running underneath the pause. If the pause lifts
+before that deadline, the flash shows for what is left of it (row 7); if the deadline has passed,
+the light goes dark. That is what today's `Decide` does for one line (`watcher.go:371-380`: the
+pause is checked first, then `flashUntil`, which a pause never clears), and the precedence the S79
+design set ("paused > flash-window > idle", its §5.2). The user guide's sentence that the light
+"does not go back to flashing when the pause lifts" (`BEACON-DASHBOARD.md:351-354`) overstates
+the code; T9 corrects it and T4 pins the resume. Nothing about the guards changes.
 
 ### 7.3 The wanted state of a beacon
 
@@ -349,6 +388,16 @@ Concurrent fetches rather than one after another: with one line a hung dashboard
 `pollTimeout` per tick; serial fetches would cost one per line, so four lines could stretch a tick
 to six seconds. Concurrent, a tick is bounded by one timeout whatever the line count.
 
+**A throttled line.** The dashboard shipped no rate limit of its own in v0, and the Cloudflare
+front in front of it can throttle (S79 §4.3); today's loop treats every answer that is not a 401
+or a 404 as `unreachable` at full cadence (`watcher.go:164-175`). The loop gains one case, **per
+line**: an HTTP **429** backs that line off until the moment `Retry-After` names (a number of
+seconds or an HTTP date), **capped at 30 s**, and 10 s when the header is absent or unreadable.
+Meanwhile that line's pairs see a failed poll (blind, dark, as any failed poll), its status is
+`throttled`, and the other lines keep their cadence. 5xx and unreachable stay exactly as today:
+`lost`, full cadence. The tray's words for it: `▲ Dashboard: slowed by the dashboard (line 2,
+retry in 12s)`; `GET /beacons` reports `throttled`.
+
 ### 8.2 Requests per second, at the worst realistic desk
 
 Requests depend on **distinct lines**, not beacons. Three beacons on one line are one request per
@@ -362,15 +411,18 @@ tick.
 | Same, fastest setting | 8 | 500 ms | **16.0** |
 
 Plus the settings page's line list, at most once per five seconds while the page is open
-(`lines.go:131`). Compare the dashboard's own measurement when the read API was designed: four
-pollers at 2 Hz for 10 s, 84 polls, **0 errors**, p95 8.3 ms; and "ten companions ≈ 20 req/s …
-negligible against live GSI ingest" (DOTA-DASHBOARD
-`docs/superpowers/specs/2026-08-12-s79-beacon-companion-design.md` §3.2, §4.3). The worst row
-here, 16 req/s, sits under what was already judged negligible, and the realistic rows are a
-tenth of it. The fan-out does land its requests together at each tick, a burst of up to eight;
-the dashboard answers from memory on a threadpool (S79 §4.2 "cache-read only, no disk on the
-request path"), so a burst of eight is eight `/ping`-class reads. **No dashboard change is needed
-for load**, and §16 asks for none.
+(`lines.go:131`). The only load figures that exist were measured **before `/api/v0` existed, on
+the dashboard's page route** `GET /line/1/state` (a 4.6 KB viewer-tier body): four pollers at
+2 Hz for 10 s, 84 polls, **0 errors**, p95 8.3 ms (DOTA-DASHBOARD
+`docs/superpowers/specs/2026-08-12-s79-beacon-companion-design.md` §3.2). The `/api/v0`
+projection that then shipped is a ~200-byte cache read with no disk on the request path (S79
+§4.2), so those figures bound its cost from above rather than measure it; on that basis S79 §4.3
+sized "ten companions ≈ 20 req/s" as negligible and shipped **no rate limiting in v0**, noting
+that Cloudflare can throttle abuse. The arithmetic above stands: the worst row, 16 req/s, sits
+under that sizing, and the realistic rows are a tenth of it. The fan-out does land its requests
+together at each tick, a burst of up to eight `/ping`-class reads. **No dashboard change is needed
+for load**, §16 asks for none, and §8.1's handling of a 429 is what the tray does if the front
+ever disagrees.
 
 ## 9. The HTTP API
 
@@ -385,29 +437,41 @@ POST /spin?beacon=<id>          drives that one
 POST /spin?beacon=<id>&beacon=<id>   drives those
 ```
 
-`<id>` is the beacon's id (`sn:…` / `port:…`) **or its exact name**; the id is tried first. The
-handler reads it with `r.ParseForm()` + `r.Form["beacon"]`, which Go fills from the query string
+`<id>` is the beacon's **public id** (`b1`, `b2`, …, §5.3) **or its exact name**; the id is tried
+first, and a name can never look like an id because the save refuses one (§5.4). Every value is
+**percent-encoded like any query value**: `?beacon=b1` needs nothing, `?beacon=Desk%20left` is
+the name `Desk left`. The Companion module builds its URLs by template (`src/index.ts:44`), so
+S17's picker sends the public id, and a typed name goes through `encodeURIComponent`. The handler
+reads the values with `r.ParseForm()` + `r.Form["beacon"]`, which Go fills from the query string
 and, for a POST with a form body, from the body too; the documented way is the query string.
 
 Why a query parameter and not a form field: the Companion module posts with **no body and no
 content type** (`src/index.ts:44`, `fetch(url, {method: 'POST'})`), so a form field would make
 every caller grow a body and a header, while `?beacon=` is one more token on the URL the module
-already builds; `curl -X POST "http://127.0.0.1:1337/spin?beacon=Desk%20left"` is a one-liner for
-a script (a space in a name travels as `%20`); and the token (S18) will ride a header, leaving the query string to say *which*.
+already builds; `curl -X POST http://127.0.0.1:1337/spin?beacon=b1` (or
+`"…/spin?beacon=Desk%20left"` by name) is a one-liner for a script; and the token (S18) will ride
+a header, leaving the query string to say *which*.
 
 Replies:
 
 | Call | Reply |
 |---|---|
-| no `beacon`, at least one beacon connected | `200 {"state", "connected"}` for the beacons as a whole, after the command (the §9.2 aggregate). A beacon whose command fails is dropped for reconnection, as today (`server.go:86-89`), and the rest go on; the reply is still 200 because the aggregate is true of what remains. |
-| no `beacon`, none connected | `503 {"error": "beacon not connected"}` — today's text (`server.go:83`) |
-| `beacon=<id>`, known and connected | `200 {"state", "connected"}` **about that beacon** |
+| no `beacon`, at least one beacon connected | `200 {"state", "connected"}` for the beacons as a whole, after the command (the §9.2 aggregate). A beacon whose command fails is dropped for reconnection, as today (`server.go:86-89`), and the rest go on; 200 because the aggregate is true of what remains. If **every** connected beacon's command fails: `503 {"error": "beacon disconnected"}`, today's text (`server.go:88`), and all are dropped for reconnection. |
+| no `beacon`, none connected | `503 {"error": "beacon not connected"}`, today's text (`server.go:83`) |
+| `beacon=<id>`, known and connected | `200 {"state", "connected"}` **about that beacon**; if its command fails, `503 {"error": "beacon disconnected"}` and it is dropped for reconnection |
 | `beacon=<id>`, known and unplugged | `503 {"error": "beacon not connected"}` |
-| `beacon=<id>`, unknown | `404 {"error": "no such beacon"}` |
-| several ids, mixed | each resolved as above; one unknown fails the whole call with 404 before anything is driven |
+| `beacon=<id>`, unknown (neither a public id nor a name) | `404 {"error": "no such beacon"}`; nothing is driven |
+| `beacon=` present but empty or whitespace | `400 {"error": "beacon must name a beacon"}`; nothing is driven |
+| several values, any one unknown or empty | the 404 or 400 above, before anything is driven |
+| several values, all known, some unplugged and some connected | the connected ones are driven; `200 {"state", "connected"}` about the named set (the §9.2 aggregate over those beacons, so `connected` is true) |
+| several values, all known, all unplugged | `503 {"error": "beacon not connected"}` |
+| several values, all known and connected, every command fails | `503 {"error": "beacon disconnected"}`; all dropped for reconnection |
+| the same value twice | driven once |
 | wrong method | `405`, as today |
 
-The existing tests in `server_test.go` pass unchanged (the freeze, in test form).
+The no-parameter rows are today's replies exactly, status and body. The six tests in
+`server_test.go` keep every assertion; their one setup line changes with the registry (§14.2 says
+how), so they pass changed, not unchanged.
 
 ### 9.2 `GET /status`
 
@@ -429,12 +493,9 @@ so task T3's property test covers both.
 {
   "v": 1,
   "beacons": [
-    {"id": "port:6&2a1b3c4d&0&0001", "name": "Desk left",  "connected": true,  "state": "spin",
-     "lines": [1, 3], "watch": "ok"},
-    {"id": "port:6&2a1b3c4d&0&0002", "name": "Desk right", "connected": false, "state": "idle",
-     "lines": [2],    "watch": "ok"},
-    {"id": "port:6&2a1b3c4d&0&0003", "name": "",           "connected": true,  "state": "idle",
-     "lines": [],     "watch": "off"}
+    {"id": "b1", "name": "Desk left",  "connected": true,  "state": "spin", "lines": [1, 3], "watch": "ok"},
+    {"id": "b2", "name": "Desk right", "connected": false, "state": "idle", "lines": [2],    "watch": "ok"},
+    {"id": "b3", "name": "",           "connected": true,  "state": "idle", "lines": [],     "watch": "off"}
   ]
 }
 ```
@@ -442,11 +503,12 @@ so task T3's property test covers both.
 - `v` is the shape's version, `1`. `beacons` is in config order, then newly seen unnamed beacons
   in the order they were found; it includes configured beacons that are unplugged
   (`connected: false`) so a picker can offer a beacon that is temporarily off.
-- `id`, `name` as §5.3/§5.4 (`name` is `""` until the operator names it). `state` is the beacon's
-  own, one of `idle`/`spin`/`flash`. `lines` is what it follows. `watch` is `ok` when every line it follows
-  is `ok`, otherwise the status of its first line (in `lines` order) that is not `ok`, in the
-  tray's own words (`watcher.go:95-109`: `off`, `no-token`, `ok`, `lost`, `rejected`, `no-line`,
-  `stopped`, `no-game-yet`, `quiet`); `off` for a beacon with no lines.
+- `id` is the **public id** (§5.3); the match key is internal and not published. `name` is as
+  §5.4 (`""` until the operator names it). `state` is the beacon's own, one of
+  `idle`/`spin`/`flash`. `lines` is what it follows. `watch` is `ok` when every line it follows is
+  `ok`, otherwise the status of its first line (in `lines` order) that is not `ok`, in the tray's
+  own words (`watcher.go:95-109`: `off`, `no-token`, `ok`, `lost`, `rejected`, `no-line`,
+  `stopped`, `no-game-yet`, `quiet`, plus `throttled` from §8.1); `off` for a beacon with no lines.
 - `GET` only; `405` otherwise. JSON, `Cache-Control: no-store`.
 - **S18:** open, like `/status` (D3). If the owner picks the alternative, the check is the same
   one the control routes get, nothing route-specific.
@@ -466,9 +528,11 @@ beacon, as today.
   "dashboard_url": "https://dashboard.example.com",
   "token": "the-token-you-were-given",
   "poll_interval_ms": 2000,
+  "beacon_seq": 3,
   "beacons": [
     {
-      "id": "port:6&2a1b3c4d&0&0001",
+      "id": "b1",
+      "key": "port:6&2a1b3c4d&0&0001",
       "name": "Desk left",
       "lines": [1, 3],
       "flash_seconds": 15,
@@ -488,7 +552,9 @@ beacon, as today.
 
 The last five keys are the mirror of the first beacon (D5): written on every save from
 `beacons[0]` (its first line, or `1` if it follows none), read by a `dashboard-v0.8.0` build and
-ignored by this one whenever `beacons` is present.
+ignored by this one whenever `beacons` is present. `beacon_seq` is the public-id counter (§5.3):
+the next beacon gets `b<beacon_seq+1>`, and it only ever goes up, so a forgotten `b2` is never
+handed to another light. `id` is the public id, `key` the match key.
 
 Per-beacon values load with the same forgiveness as today's top-level ones (`config.go:151-167`):
 a missing or out-of-range number lands on the documented default; an unknown `pause_side` loads
@@ -501,18 +567,20 @@ atomically (`config.go:186-227`), unchanged.
 A v0.8.0 file (`BEACON-DASHBOARD.md` §7's sample) has no `beacons` key. Load rule:
 
 1. Parse as today. If `beacons` is absent or empty, **synthesise one record** from the top-level
-   keys: `id: ""`, `name: "Beacon 1"`, `lines: [line_number]`, light settings from the four
-   top-level keys. Nothing is written yet; loading stays a pure read.
-2. A record with `id: ""` is **unmatched**: it binds to the first connected beacon that no other
+   keys: `id: "b1"` (the counter starts at 1), `key: ""`, `name: "Beacon 1"`,
+   `lines: [line_number]`, light settings from the four top-level keys. Nothing is written yet;
+   loading stays a pure read.
+2. A record with `key: ""` is **unmatched**: it binds to the first connected beacon that no other
    record claims, in enumeration order, the moment the device manager (§12) sees one. On binding,
-   the record takes that beacon's real id and the config is saved, so the next start matches by
-   id. With one light plugged in this is today's behaviour exactly: the first (only) beacon found
-   is driven by the configured line with the configured settings, and the HTTP routes, tray and
-   settings page read as they do today.
+   the record takes that beacon's match key and the config is saved through the one writer
+   (§10.5), so the next start matches by key. With one light plugged in this is today's behaviour
+   exactly: the first (only) beacon found is driven by the configured line with the configured
+   settings, and the HTTP routes, tray and settings page read as they do today.
 3. With several lights plugged in at that first start, the unmatched record binds to the first one
    enumerated and the others appear as new beacons following nothing (§10.4). The operator sorts
    it on the settings page, with Identify to tell them apart; the settings row shows each
-   beacon's id, and `Beacon 1` is whichever light was enumerated first.
+   beacon's public id and match key, and `Beacon 1` (`b1`) is whichever light was enumerated
+   first.
 
 The build's loader test (task T2; a parser, plan-gate rule 3) ends with a read-only smoke on a
 real-shape v0.8.0 fixture with keys omitted the way old files omit them (a v0.5.0 file has none
@@ -524,19 +592,45 @@ The record stays. The beacon's tray row and `GET /beacons` say `unplugged` (`con
 Its (beacon, line) watchers keep running: the flash deadline and the guards are the record's, not
 the handle's, exactly as the single watcher survives a USB drop today (the loop never looks at the
 beacon except in `applyState`, which skips while disconnected, `watcher.go:553-555`). When the
-same identity reappears it is re-opened, re-bound to its record, and the wanted state is applied
+same match key reappears it is re-opened, re-bound to its record, and the wanted state is applied
 on the next tick: a replug mid-pause resumes spinning. (`docs/PUNCHLIST.md:31` records that this
 has never been checked on hardware for one beacon; §14.3 step 9 checks it for several.)
 
 ### 10.4 A beacon seen for the first time
 
-It gets an **in-memory** record: its real id, `name: ""`, `lines: []`, default light settings. It
-follows nothing, so no line can light it; the hand controls and a call without a beacon choice do
-drive it (the owner: existing buttons "drive every beacon at once"). It is listed in the tray, on
-the settings page and in `GET /beacons`. **Nothing is written to the config** until the operator
-names it or gives it a line on the settings page; a light borrowed for an afternoon leaves no
-record behind. Forgetting a configured beacon is a button on its settings row, enabled while it is
-unplugged.
+It gets an **in-memory** record: its match key, a public id taken from the counter (the counter
+advances in memory and is written with the record at the first save), `name: ""`, `lines: []`,
+default light settings. It follows nothing, so no line can light it; the hand controls and a call
+without a beacon choice do drive it (the owner: existing buttons "drive every beacon at once").
+It is listed in the tray, on the settings page and in `GET /beacons`. **Nothing is written to the
+config** until the operator names it or gives it a line on the settings page; a light borrowed
+for an afternoon leaves no record behind, and its never-saved public id may be handed out again
+after a restart, which is the one case the never-reused rule does not cover. Forgetting a
+configured beacon is a button on its settings row, enabled while it is unplugged.
+
+### 10.5 One writer
+
+Today the config has one writer, the settings POST, which saves and hands the new config to
+`main.go` through `restartCh`, and that restarts the HTTP server (`settings_handler.go:322-340`,
+`main.go:49-83`). Binding a record to a light (§10.2) would be a second writer, and two writers
+with no rule means a settings tab opened before a bind could save the pre-bind record over it.
+The design has **one writer**:
+
+- A `configStore` owns the live `Config` behind a mutex: `Get()` (what `getCfg` is today,
+  `main.go:42-46`) and `Update(func(*Config) error)`, which applies the change to the live config,
+  writes it with today's atomic owner-only save (`config.go:189-227`), and publishes it. Every
+  change goes through it: the settings POST, a bind, Take over, Forget. Nothing else calls
+  `saveConfig`.
+- The HTTP server restarts only when `addr` or `port` changed in an update; a bind never touches
+  them, so it saves without a restart. `restartCh` carries the restart, not the config.
+- **The settings POST merges, by public id.** Each row carries its record's public id in its
+  field names (`b1.name`, §11.2). For a known id the form's name, lines and light settings
+  replace the record's; the record's match key, bound state and public id are never on the form
+  and never change through it. A record in the live config that the form does not mention (a
+  light bound after the page was opened) is **kept** as it is. A row whose id is no longer in the
+  live config (forgotten after the page was opened) **refuses the whole save** with `409` and the
+  sentence "Beacon b3 was forgotten after this page was opened — reopen Settings", and nothing is
+  written. So a stale tab can neither undo a bind nor resurrect a forgotten record.
 
 ## 11. The tray menu and the settings page
 
@@ -551,28 +645,40 @@ Settings…
 Spin            (every beacon)
 Flash           (every beacon)
 Stop            (every beacon)
-─────────────────────────
-Desk left — Spinning · Line A, Line C        ▸  ● Spinning
-                                                 Following: Line A (watching · picks), Line C (watching · game state)
-                                                 ─────
-                                                 Spin
-                                                 Flash
-                                                 Stop
-                                                 Identify
-Desk right — Unplugged · Line B              ▸  …
-New beacon (port:6&2a…&0&0003) — Idle · Unbound ▸ …
+Beacons                                      ▸  Desk left — Spinning · Line A, Line C   ▸  ● Spinning
+                                                                                           Following: Line A (watching · picks), Line C (watching · game state)
+                                                                                           ─────
+                                                                                           Spin
+                                                                                           Flash
+                                                                                           Stop
+                                                                                           Identify
+                                                Desk right — Unplugged · Line B         ▸  …
+                                                New beacon (b3) — Idle · Unbound        ▸  …
 ─────────────────────────
 Start with Windows
 Quit
 ```
 
 - `getlantern/systray` v1.2.2 has `AddSubMenuItem` (`systray.go:142`), `Hide` (`:189`) and `Show`
-  (`:194`), and items can be added after the menu is up, but only **appended at the bottom**:
-  there is no insert. So `onTrayReady` creates **eight** beacon submenus, hidden, between the
-  all-beacon controls and the startup row, and the 500 ms sync loop (`tray.go:69-141`) shows,
-  hides and retitles them as beacons come and go. Eight is the menu's limit; a ninth beacon is
-  still driven and listed by HTTP and the settings page, and the top row says `9 beacons (8 shown
-  here)`.
+  (`:194`), but on Windows **anything shown or updated lands at the bottom of its parent's visible
+  items**: `SetTitle`, `Enable`, `Disable` and `Check` all go through `update()`
+  (`systray.go:160-221`), and `addOrUpdateMenuItem` inserts an item that is not currently visible
+  at the end of its parent (`systray_windows.go:491-581`); `Hide` removes it (`:619-635`). There is
+  no insert. A beacon submenu at the root level, shown after start, would therefore sit below
+  Quit. Hence the one `Beacons ▸` entry, created visible at start in its place, whose only
+  children are the beacon slots. **The ordering rule:** `onTrayReady` creates **eight** slot
+  submenus under `Beacons`, hidden, each with its six children; a slot is assigned to a beacon in
+  order of first appearance; a slot is **retitled, and its children set, before `Show()`**, and
+  is **never touched while hidden** (no title, state or child update); `Hide()` is the only call
+  made on a slot being retired, and a retired slot is reused by the next new beacon. A re-shown
+  slot lands at the end of the `Beacons` list, so the order inside it is the order of
+  (re)appearance, and the root menu never changes. The 500 ms sync loop (`tray.go:69-141`)
+  applies updates to visible slots only. Eight is the menu's limit; a ninth beacon is still driven
+  and listed by HTTP and the settings page, and the top row says `9 beacons (8 shown here)`. T7's
+  fake menu models Windows exactly (an update to a hidden item makes it visible, at the end of its
+  parent), and its unit test fails on any update to a hidden slot and on any change to the root
+  order. Whether a hidden submenu parent re-shows with its children intact on real Windows is a
+  hand step in T10.
 - Per-beacon rows reuse today's words: the status row's four states (`tray.go:107-136`), the
   bound row's `Bound: Line C` / `Bound: line 3 (unnamed)` / `Unbound` (`watcher.go:583-590`), one
   per followed line, and the watch row's sentences (`watcher.go:602-629`) per line.
@@ -599,17 +705,17 @@ Dashboard Watcher
 Beacons                                     Your dashboard's lines, read just now: Line A · running, Line B · stopped, Line C · running
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │ ● Desk left                       plugged in · spinning            [Identify]  │
-│   Name  [Desk left            ]   id port:6&2a1b3c4d&0&0001                     │
+│   Name  [Desk left            ]   b1 · key port:6&2a1b3c4d&0&0001               │
 │   Lines [x] Line A · running   [ ] Line B · stopped   [x] Line C · running      │
 │   Draft-End Flash [15] s   New-Lobby Flash [ ] on, [10] s   Spin For Pauses From [Both sides ▾] │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │ ○ Desk right                      unplugged                         [Forget]   │
-│   Name  [Desk right           ]   id port:6&2a1b3c4d&0&0002                     │
+│   Name  [Desk right           ]   b2 · key port:6&2a1b3c4d&0&0002               │
 │   Lines [ ] Line A   [x] Line B   [ ] Line C                                    │
 │   Draft-End Flash [15] s   New-Lobby Flash [x] on, [10] s   Spin For Pauses From [Radiant only ▾] │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │ ● New beacon                      plugged in · idle                 [Identify]  │
-│   Name  [                     ]   id port:6&2a1b3c4d&0&0003                     │
+│   Name  [                     ]   b3 · key port:6&2a1b3c4d&0&0003               │
 │   Take over the settings of  [ — ▾ | Desk right ]                               │
 │   Lines [ ] Line A   [ ] Line B   [ ] Line C                                    │
 │   Draft-End Flash [15] s   New-Lobby Flash [ ] on, [10] s   Spin For Pauses From [Both sides ▾] │
@@ -625,18 +731,23 @@ HTTP API   (the existing block, with ?beacon= and GET /beacons added)
   it today (`settings_handler.go:526-534`). When the list is unavailable the control falls back
   to a text field `line numbers, comma-separated` with the same one-line reason (`token
   rejected`, `unreachable`, `no token`).
-- **Form fields** are indexed, not keyed by id (ids contain `&` and `\`): `b0.id` (hidden),
-  `b0.name`, `b0.lines` (multi-value), `b0.flash_seconds`, `b0.lobby_flash`,
-  `b0.lobby_flash_seconds`, `b0.pause_side`, `b0.takeover` (the id of the record to absorb).
-  Validation per beacon is today's (`formSeconds`, `validPauseSide`), naming the beacon and
-  field in the refusal: `Desk right: flash_seconds must be …`. Names are escaped on render
-  (`html.EscapeString`, as every operator string is on this page) and refused when duplicated.
+- **Form fields** are keyed by the record's public id, which is safe in a field name: `b1.name`,
+  `b1.lines` (multi-value), `b1.flash_seconds`, `b1.lobby_flash`, `b1.lobby_flash_seconds`,
+  `b1.pause_side`, `b1.takeover` (the public id of the record to absorb). The match key is shown
+  on the row as text and is not a form value. Validation per beacon is today's (`formSeconds`,
+  `validPauseSide`), naming the beacon and field in the refusal: `Desk right: flash_seconds must
+  be …`. Names are escaped on render (`html.EscapeString`, as every operator string is on this
+  page), refused when duplicated, and refused when they would read as a public id (§5.4). The
+  save is a merge by public id (§10.5): a row for a forgotten id refuses the whole save.
 - **Identify** and **Forget** are buttons of the same form with `name="action"` values
-  `identify:<index>` and `forget:<index>`; the handler acts and redirects back to `/settings`
-  without saving the rest of the form, so a half-edited page is not committed by an Identify
-  click. Both carry the CSRF token by being in the form.
-- **Take over** moves a record's name, lines and light settings onto the new beacon's id and
-  deletes the old record, in one save (D1).
+  `identify:b1` and `forget:b2`; the handler looks the public id up in the live config and acts on
+  that record only. An id that is no longer there is refused with `409` ("reopen Settings"), never
+  applied to another row. Both act and redirect back to `/settings` without saving the rest of the
+  form, so a half-edited page is not committed by an Identify click, and both carry the CSRF
+  token by being in the form.
+- **Take over** moves a record's name, lines and light settings onto the new beacon's record and
+  deletes the old record, in one save through the one writer (D1, §10.5). The new record keeps
+  its own public id; the old one's is retired with it.
 
 ## 12. Hot-plug and failure
 
@@ -645,16 +756,26 @@ library's keepalive worker writes the current command every 5 s and calls `OnErr
 write (`pkg/fsbeacon/usbhid.go:70-80`), which `main.go:95` turns into `SetBeacon(nil)`; the
 goroutine then closes the handle and goes back to retrying.
 
-New: a **device manager** goroutine owning a map `id → open handle`:
+New: a **device manager** goroutine owning a map `match key → open handle`, talking to the
+library through the seam in §14.2:
 
-1. Every 10 s (today's cadence, kept): `Enumerate(vid, pid)`. For each path not already open:
-   `OpenPath`, compute the id (§5.3), bind to the record with that id, or to an unmatched record
-   (§10.2), or create an in-memory record (§10.4); `StartIdleWorker`; set `OnError` to mark **that
-   beacon** unplugged and schedule its close.
-2. A failed command on a beacon, from any caller (tray, HTTP, watcher), marks that beacon
-   unplugged, as each caller does today for the one beacon (`main.go:127-128`, `server.go:87`,
-   `watcher.go:566-571`); the others are untouched.
-3. Each beacon is its own `FarmBeacon` with its own mutex, worker goroutine and handle
+1. Every 10 s (today's cadence, kept): `Enumerate()`. For each path not already open: `Open`,
+   read the match key from the handle (`Key()`, §5.3; on macOS that is the location id, read
+   after open), bind to the record with that key, or to an unmatched record (§10.2), or create an
+   in-memory record (§10.4); `StartIdleWorker()`; register the unplug callback with `OnUnplug`.
+2. **The unplug callback does two things and nothing else: it marks that beacon unplugged and
+   sends its key on the manager's channel.** The manager's own goroutine closes the handle. The
+   callback runs on the library's keepalive goroutine **while that goroutine holds the
+   `FarmBeacon` mutex** (`pkg/fsbeacon/usbhid.go:63-66`: the lock is taken for the worker's whole
+   life, and `OnError` is called inside it at `:77-80`). A `Stop()` from inside the callback would
+   send on `beacon.stop`, which only that same worker reads (`:83`), and block for ever; any other
+   command on the handle would wait on the mutex. T5's fake keepalive holds the fake's mutex while
+   it fires the callback, and every command on the fake takes that mutex, so a close or stop from
+   inside the callback deadlocks the test, which fails on a two-second timeout rather than hanging.
+3. A failed command on a beacon, from any caller (tray, HTTP, watcher), marks that beacon
+   unplugged and hands the close to the manager the same way, as each caller does today for the
+   one beacon (`main.go:127-128`, `server.go:87`, `watcher.go:566-571`); the others are untouched.
+4. Each beacon is its own `FarmBeacon` with its own mutex, worker goroutine and handle
    (`pkg/fsbeacon/usbhid.go:38-45`); nothing is shared between two lights but the `hid` library's
    global init, which is idempotent.
 
@@ -668,10 +789,10 @@ and their next commands.
 the map).
 
 The **library change** this needs (task T1): `pkg/fsbeacon` gains `Enumerate() ([]DeviceInfo,
-error)` and `OpenPath(path string) (*FarmBeacon, error)`, and `FarmBeacon` keeps the
-`DeviceInfo` it was opened from. `OpenFarmBeacon()` stays as it is for the upstream CLI
-(`cmd/fsbeacon`). The upstream comment at `usbhid.go:3` is corrected once the probe has shown
-what it meant.
+error)` and `OpenPath(path string) (*FarmBeacon, error)`, `FarmBeacon` keeps the `DeviceInfo` it
+was opened from and exposes it as `Info()`, and on macOS `LocationID()`. `OpenFarmBeacon()` stays
+as it is for the upstream CLI (`cmd/fsbeacon`). The tray's `farmHandle` (§14.2) wraps all of it.
+The upstream comment at `usbhid.go:3` is corrected once the probe has shown what it meant.
 
 ## 13. macOS
 
@@ -690,15 +811,15 @@ code except the identity source:
 - **Identity** is the location id, read after open (`hid_darwin.go:33`); the enumeration path is
   per-attach and never stored (§5.2). The port-key function is therefore platform-specific, the
   only platform-specific line in the identity code.
-- **Bundle:** no new entitlement. Opening a non-keyboard HID device needs no Input Monitoring
-  permission; the existing app already opens one.
+- **Permissions:** unknown. Whether opening this light trips a macOS permission prompt is one of
+  §3's unknowns, settled at the first Mac run; nothing here assumes either way.
 
 Nothing here can be run in this session (`cgo` needs Cocoa and IOKit), and no Mac has ever been
 run against a light (`docs/PUNCHLIST.md:30`). Verification stays what it is for every release:
 the `build` workflow's macOS jobs green on the pushed branch (`.github/workflows/build.yml`,
 `macos` job), the artifact unzipped and listed. The hands-on macOS check waits with the punchlist
-item. The probe's `extra_darwin.go` is ten lines against a signature read from the library source;
-it is marked unverified in the retro.
+item. The probe's `extra_darwin.go` is 27 lines, ten of them code, against a signature read from
+the library source; it is marked unverified in the retro.
 
 ## 14. Testing
 
@@ -708,6 +829,11 @@ it is marked unverified in the retro.
    beacon (§5.1 says why on each platform).
 2. Run `beacon-probe.exe`. Double-clicking is fine: it writes its findings to the window and to
    `beacon-probe.txt` beside itself, and waits for Enter. Send back `beacon-probe.txt`.
+   **Stop here, after sending the file, if** its `summary` says `DUPLICATED` or `MIXED`, or if two
+   `beacon N` entries show the same `port key` **and** the same `usage page / usage`: those lights
+   cannot be told apart, and the design is revisited before anything is built (§3, §5.3). Two
+   entries with the same `port key` and *different* usage lines are one light with two
+   collections, which is fine; step 4 shows it as one light flashing twice.
 3. Move one beacon to another USB port and run it again. It appends to the same file, so the
    before and after sit together. (A run after a reboot, same ports, is one more useful pair.)
 4. Run `beacon-probe.exe -flash` from a terminal (`cmd` or PowerShell in the exe's folder). Each
@@ -734,31 +860,64 @@ The device manager (§12) takes an interface, so the suite needs no hardware and
 (`go test ./...` is red on Linux for that reason, `docs/PUNCHLIST.md`, "Documented quirks"):
 
 ```go
+// devices.go — the seam between the device manager (§12) and the USB library.
 type deviceSource interface {
-    Enumerate() ([]fsbeacon.DeviceInfo, error)
-    Open(path string) (Beacon, error)   // the local Beacon mirror, state.go:19-24
+    Enumerate() ([]deviceInfo, error)            // every beacon the library can see
+    Open(info deviceInfo) (deviceHandle, error)  // open that one
+}
+
+type deviceInfo struct {
+    Path      string // what Open takes; never stored
+    Serial    string // "" when the light reports none
+    UsagePage uint16 // §3: a light with several collections shows one path per collection
+    Usage     uint16
+}
+
+type deviceHandle interface {
+    Beacon            // Flash, Spin, Stop, Close — the local mirror (state.go:19-24)
+    Key() string      // the match key, "sn:…" or "port:…" (§5.3), computed by the source;
+                      // on macOS from the open handle's location id (hid_darwin.go:33)
+    OnUnplug(func())  // registers the callback the keepalive fires on a failed write
+                      // (FarmBeacon.OnError, pkg/fsbeacon/usbhid.go:44)
+    StartIdleWorker() // pkg/fsbeacon/usbhid.go:155-157
 }
 ```
 
-The real source is the library, behind `//go:build windows || darwin` as `main.go` is today
-(`main.go:1`). The fake, `fakeBus`, is a test type in the tray package beside `mockBeacon`
-(`server_test.go:10-21`) and `countingBeacon` (`watcher_test.go:508-516`):
+The real source, `farmSource`, and its handle, `farmHandle` (a `*fsbeacon.FarmBeacon` with the
+`DeviceInfo` it was opened from), live behind `//go:build windows || darwin` as `main.go` does
+today (`main.go:1`); `beacon_check.go` gains `var _ deviceHandle = (*farmHandle)(nil)` beside its
+existing assertion (`beacon_check.go:10`). The fake, `fakeBus`, is a test type in the tray package:
 
-- `plug(serial, portKey)` adds a device; `unplug(portKey)` removes it from enumeration and makes
-  its open handle's next `Spin`/`Flash`/`Stop` return an error and fire `OnError`;
-  `move(portKey, newPortKey)` is an unplug then a plug with the same serial and a new port;
-  `failNext(portKey)` makes one command fail without unplugging, for the "one beacon failing"
-  case.
+- `plug(serial, portKey, usagePage, usage)` adds a device; `unplug(portKey)` removes it from
+  enumeration and makes its open handle's next `Spin`/`Flash`/`Stop` return an error, and fires
+  the registered unplug callback **from the fake's own keepalive goroutine while holding the
+  fake's mutex**, which every command on the fake also takes (§12, 2); `move(portKey,
+  newPortKey)` is an unplug then a plug with the same serial and a new port; `failNext(portKey)`
+  makes one command fail without unplugging, for the "one beacon failing" case.
 - Each fake handle counts commands, as `countingBeacon` does, and records the order they came in.
 - The fake's identity mode is set per test (`sn` or `port`), so both branches of §5.3 are
   exercised whatever the probe decides.
+
+**What changes in the existing tests, honestly.** `AppState.SetBeacon` goes away with the registry
+(T3), so every test that plants a beacon changes its setup line: `watch_loop_test.go` (23 calls
+across 54 tests), `server_test.go` (3 calls, 6 tests), `watcher_test.go` (3 calls, plus 8 calls of
+`applyState`, which becomes per-beacon), `watch_loop_cadence_test.go` (2),
+`settings_handler_test.go` (1), `state_test.go` (3, rewritten for the registry) and
+`integration_test.go` (3, skipped without a dashboard). The fakes stay: `mockBeacon`
+(`server_test.go:10-21`) and `countingBeacon` (`watcher_test.go:508-516`) remain `Beacon`
+implementations, planted through one test helper, `plant(app, key, Beacon)`, which wraps them in
+a `fakeHandle` with a fixed key, a no-op `StartIdleWorker` and a stored callback. The dashboard
+stubs and every assertion stay. About 35 setup lines change; no test's expectation does.
 
 Scenarios the suite pins: three beacons bound to three records; unplug one and the other two keep
 their state and take their next commands; replug and the record re-binds and the wanted state is
 re-applied (a pause resumes spinning); a port move yields one unplugged record and one new
 unassigned beacon, and `takeover` merges them; a first-seen beacon follows nothing and is driven
 by a bodiless `POST /spin`; an unmatched v0.8.0 record binds to the first light and the config is
-saved with its id; in `sn` mode a duplicate serial is refused and reported.
+saved with its key, without an HTTP restart; a settings save from a page opened before that bind
+keeps the bind (§10.5); a save naming a forgotten public id is refused and nothing is written;
+Identify or Forget on a gone id is refused; in `sn` mode a duplicate serial at run time is refused
+and reported; a close from inside the unplug callback deadlocks (the test's own guard, §12, 2).
 
 ### 14.3 The owner's hands-on plan, three or more real lights
 
@@ -771,7 +930,7 @@ least two official lines (call them Line A and Line B). Each step says what to l
    pause on it. Open Settings: one beacon row, `Beacon 1`, following the old line, with the old
    light settings.
 2. **Name it.** Type `Desk left`, Save. *Expect:* the tray's row says `Desk left`; the config file
-   now has a `beacons` list with an `id`.
+   now has a `beacons` list with `"id": "b1"` and a `key`.
 3. **Plug in the second light.** Within ten seconds, *expect:* a `New beacon` row in the tray
    (`Unbound`) and on the settings page, following nothing. The dashboard pausing Line A spins
    Desk left only.
@@ -779,16 +938,21 @@ least two official lines (call them Line A and Line B). Each step says what to l
    seconds; the first does not. Name it `Desk right`, tick Line B, Save.
 5. **Two lines, two lights.** Pause Line B on the dashboard. *Expect:* Desk right spins, Desk left
    dark. Pause Line A too. *Expect:* both spin. Unpause A. *Expect:* only Desk right spins.
-6. **One light, two lines.** On Desk left tick Line A **and** Line B, Save. Pause Line B.
-   *Expect:* both lights spin (Desk left for B, Desk right for B). End a draft on Line A while B is
-   paused. *Expect:* Desk left keeps spinning (the pause outranks the flash; §7.2 row 2), Desk
-   right keeps spinning. Unpause B. *Expect:* Desk left goes dark, not back to flashing (the flash
-   was spent under the pause); Desk right dark.
+6. **One light, two lines.** On Desk left tick Line A **and** Line B, and set its Draft-End Flash
+   to `60` for this step so the window is long enough to see; Save. Pause Line B. *Expect:* both
+   lights spin (Desk left for B, Desk right for B). End a draft on Line A while B is paused.
+   *Expect:* Desk left keeps spinning (the pause outranks the flash; §7.2 row 2), Desk right keeps
+   spinning. Unpause B **within the minute**. *Expect:* Desk left **flashes** for what is left of
+   the 60 s (§7.2 row 7), then goes dark; Desk right dark. Then put the flash back to `15`, Save,
+   and repeat the pause and draft end, but wait **more than 15 s** before unpausing. *Expect:* Desk
+   left goes dark, the window having run out under the pause.
 7. **Different settings on one line.** Set Desk left's draft flash to 5 s and Desk right's to 20 s;
    both follow Line A only. End a draft on A. *Expect:* both flash; Desk left stops after about
    5 s, Desk right after about 20.
 8. **The Companion buttons.** With the module's existing Spin button, *expect:* **both** lights
-   spin; Stop stops both. From a terminal, `curl -X POST "http://127.0.0.1:1337/flash?beacon=Desk%20left"`. *Expect:* only Desk left flashes; `curl http://127.0.0.1:1337/status` says
+   spin; Stop stops both. From a terminal, `curl -X POST http://127.0.0.1:1337/flash?beacon=b1`,
+   then `curl -X POST "http://127.0.0.1:1337/flash?beacon=Desk%20left"` (the same by name).
+   *Expect:* only Desk left flashes, both times; `curl http://127.0.0.1:1337/status` says
    `{"state":"flash","connected":true}`; `curl http://127.0.0.1:1337/beacons` lists both with
    their states. (The watcher corrects both on its next tick if they follow lines; untick the lines
    first for a longer look.)
@@ -797,8 +961,8 @@ least two official lines (call them Line A and Line B). Each step says what to l
    spinning if it follows B). Plug it back into the **same** port. *Expect:* within ten seconds
    it is `Desk right` again and **spins**, because B is still paused.
 10. **Port move.** Quit nothing. Move Desk right to a **different** port. *Expect, if the probe
-    found no serial numbers:* `Desk right — Unplugged` stays, and a `New beacon` appears. On the
-    settings page the new row offers `Take over the settings of: Desk right`; choose it, Save.
+    found no serial numbers:* `Desk right — Unplugged` stays, and a `New beacon` (`b3`) appears. On
+    the settings page the new row offers `Take over the settings of: Desk right`; choose it, Save.
     *Expect:* one row, `Desk right`, in the new port, following B. *If the probe found serial
     numbers:* nothing changes but the port; it is `Desk right` as soon as it is found.
 11. **A third light, never configured.** Plug in the third. *Expect:* `New beacon`, follows
@@ -825,17 +989,17 @@ which.
 
 | # | Task | Touches | Tested by | Marks |
 |---|---|---|---|---|
-| T0 | **Fix the identity mode from the probe's file.** One constant (`sn` or `port`) and `beaconID(info, dev)`, with the Windows and macOS port-key functions. | new `beacon_id.go`, `beacon_id_windows.go`, `beacon_id_darwin.go` | table test over sample paths and location ids, both modes; the probe's own lines as fixtures | parser (of the path) |
-| T1 | **Library: enumerate and open by path.** `fsbeacon.Enumerate()`, `fsbeacon.OpenPath()`, `FarmBeacon.Info`; `OpenFarmBeacon()` unchanged. | `pkg/fsbeacon/usbhid.go` | `go vet` under `GOOS=windows` and `darwin` via CI; `beacon_check.go`'s compile-time assertion; the existing hardware test | third-party API |
-| T2 | **Config: the `beacons` list, migration, mirror.** §10.1–10.2, D5. | `config.go`, `config_test.go` | load of a v0.5.0, v0.7.0 and v0.8.0 file each yields one unmatched record with the right values; save-then-load round trip; mirror keys written from `beacons[0]`; forgiveness per field; **read-only smoke on the real-shape fixtures with omitted keys** | parser |
+| T0 | **Fix the identity mode from the probe's file.** One constant (`sn` or `port`), `matchKey(info, dev)` with the Windows and macOS port-key functions, and the collection rule (§3: the usage pair to open when a light shows two paths). Stops on `MIXED`, `DUPLICATED` or a port-key collision (§5.3). | new `beacon_key.go`, `beacon_key_windows.go`, `beacon_key_darwin.go` | table test over sample paths and location ids, both modes; the probe's own lines as fixtures; two paths with one instance segment yield one key | parser (of the path) |
+| T1 | **Library: enumerate and open by path.** `fsbeacon.Enumerate()`, `fsbeacon.OpenPath()`, `FarmBeacon.Info()`, `LocationID()` on macOS; `OpenFarmBeacon()` unchanged. | `pkg/fsbeacon/usbhid.go` (+ a darwin file) | `go vet` under `GOOS=windows` and `darwin` via CI; `beacon_check.go`'s compile-time assertion; the existing hardware test | third-party API |
+| T2 | **Config: the `beacons` list, public ids, migration, mirror, and the one writer.** §10.1–10.2, §10.5, D5. `configStore` with `Get`/`Update`; `beacon_seq`. | `config.go`, new `config_store.go`, `config_test.go`, `main.go` (`getCfg`/`restartCh` move onto the store) | load of a v0.5.0, v0.7.0 and v0.8.0 file each yields one unmatched `b1` with the right values; save-then-load round trip; mirror keys written from `beacons[0]`; `beacon_seq` only ever rises; forgiveness per field; an `Update` that changes neither `addr` nor `port` triggers no restart; **read-only smoke on the real-shape fixtures with omitted keys** | parser |
 | T3 | **The beacon registry and the aggregate.** Records, handles, per-beacon state, `identifyUntil`; `aggregateState`, `aggregateConnected` (§9.2). Replaces `AppState`'s single beacon. | `state.go` → `beacons.go`, `state_test.go` | property test: for every multiset of up to six beacon states, the aggregate equals the rank maximum; connected = any; **pinned values: the §9.2 table**; the existing `state_test.go` cases ported | numeric |
-| T4 | **Per-pair watchers and the combine.** §7; the loop's fan-out (§8.1). `Watcher` unchanged. | `watch_loop.go`, new `combine.go`, tests | the §7.2 table, rows 1–10, pinned; property sweep over all 3^6 answer combinations; deadlines (rows 4, 7); the 401 backoff shared and the 404 per line; one fetch per distinct line (count on the stub) | numeric |
-| T5 | **The device manager with the fake bus.** §12, §14.2. | `main.go` (the USB goroutine), new `devices.go`, `fakebus_test.go` | the §14.2 scenarios; the "one fails, two go on" case | third-party API |
-| T6 | **HTTP: `?beacon=`, `GET /beacons`, the aggregate `/status`.** §9. | `server.go`, `server_test.go`, the API block in `settings_handler.go:86-106` | **every existing `server_test.go` test passes unchanged**; the §9.1 reply table; `/beacons` shape golden; `/status` ignores `?beacon=`; 404 before any command on a mixed call | HTTP contract |
-| T7 | **The tray menu and icon.** §11.1, the S14 hook. | `tray.go`, `icons.go` | the label functions table-tested as today's are; the eight-slot show/hide logic unit-tested on a fake menu; the rest by hand (§14.3) | — |
-| T8 | **The settings page.** §11.2. | `settings_handler.go`, `settings_handler_test.go` | form round trip for two beacons; indexed fields; duplicate name refused; names escaped; Identify and Forget act without saving the form; takeover; the line checkboxes from the cached list and the comma-separated fallback; CSRF on every action | — |
-| T9 | **Docs.** `BEACON-DASHBOARD.md` §1, §2 (the picker is now per beacon), §4, §5 (the tray rows), §7 (the config sample), §8 (drop "only one line at a time"); README's API block; the settings page's API text. | docs | a reviewer reads them against the shipped behaviour, step by step with §14.3 | — |
-| T10 | **Hands-on and CI.** §14.3 on the owner's lights; the `build` workflow green for Windows and both macOS legs. | — | the owner's report; the artifacts listed | — |
+| T4 | **Per-pair watchers, the combine, and the 429 backoff.** §7; the loop's fan-out and the per-line throttle (§8.1). `Watcher` unchanged. | `watch_loop.go`, `watcher.go` (`pollFailureStatus` gains 429, `WatchThrottled`, the `Retry-After` reader), new `combine.go`, tests | the §7.2 table, rows 1–10, pinned; property sweep over all 3^6 answer combinations; deadlines (rows 4, 7); **"pause lifts inside the flash window → flash resumes" pinned on one pair** (row 7, today's `Decide`); the 401 backoff shared and the 404 per line; a 429 backs off that line only, honours `Retry-After` in seconds and as a date, caps at 30 s, defaults to 10 s; a 503 stays `lost` at full cadence; one fetch per distinct line (count on the stub) | numeric |
+| T5 | **The device manager with the fake bus.** §12, §14.2: `deviceSource`, `deviceHandle`, `farmSource`/`farmHandle`, the manager goroutine and its close channel. | `main.go` (the USB goroutine), new `devices.go`, `devices_farm.go` (windows ‖ darwin), `beacon_check.go`, `fakebus_test.go`, the ~35 setup lines listed in §14.2 | the §14.2 scenarios; the "one fails, two go on" case; **the deadlock guard: a close from inside the unplug callback fails the test on its two-second timeout** | third-party API |
+| T6 | **HTTP: `?beacon=`, `GET /beacons`, the aggregate `/status`.** §9. | `server.go`, `server_test.go`, the API block in `settings_handler.go:86-106` | **every existing `server_test.go` assertion holds, with its setup line changed as §14.2 says**; every row of the §9.1 reply table, the 400 and the three 503s included; `/beacons` shape golden; `/status` ignores `?beacon=`; 404 or 400 before any command on a mixed call; a percent-encoded name resolves | HTTP contract |
+| T7 | **The tray menu and icon.** §11.1 (the `Beacons` entry, the eight slots, the ordering rule), the S14 hook. | `tray.go`, `icons.go`, new `tray_slots.go` with its fake-menu test | the label functions table-tested as today's are; the slot logic unit-tested on a fake menu that **models Windows (an update to a hidden item makes it visible at the end of its parent)**, failing on any update to a hidden slot or any change to the root order, over plug/unplug/forget/replug sequences; the rest by hand (§14.3, T10) | — |
+| T8 | **The settings page.** §11.2, the merge (§10.5). | `settings_handler.go`, `settings_handler_test.go` | form round trip for two beacons; fields keyed by public id; duplicate name refused; a name that reads as a public id refused; names escaped; the merge: a record bound after the page loaded survives the save, a row for a forgotten id refuses the save with 409 and writes nothing; Identify and Forget act by public id without saving the form, and refuse a gone id with 409; takeover; the line checkboxes from the cached list and the comma-separated fallback; CSRF on every action | — |
+| T9 | **Docs.** `BEACON-DASHBOARD.md` §1, §2 (the picker is now per beacon), §4, §5 (the tray rows), §7 (the config sample; **correct lines 351-354 to what the code does: a pause that lifts inside the flash window hands the light back to the flash**), §8 (drop "only one line at a time"); README's API block; the settings page's API text. | docs | a reviewer reads them against the shipped behaviour, step by step with §14.3 | — |
+| T10 | **Hands-on and CI.** §14.3 on the owner's lights, plus one check on real Windows that a hidden beacon slot re-shows with its children intact; the `build` workflow green for Windows and both macOS legs. | — | the owner's report; the artifacts listed | — |
 
 Order: T0 and T1 first (T0 waits on the probe's file; T1 does not), then T2 and T3 in parallel,
 T4, T5, T6, T7 and T8 in parallel, T9, T10. The upstream vet redness on
@@ -872,9 +1036,36 @@ Measured or read in this session, in the worktree `wt/s16-spec` cut from `origin
   `5302d50d…b0e4`; `go version -m` shows `vcs.revision=fcc9126b…ee1a`, `vcs.modified=false`;
   `file` says `PE32+ executable (console) x86-64`. Build time 3.2 s.
 - Library sources read: `go-hid@v0.14.1/hid.go`, `hid_windows.go`, `hid_darwin.go`,
-  `hid_windows.c`, `hid_darwin.c`, `hidapi.h`; `systray@v1.2.2/systray.go`.
+  `hid_windows.c`, `hid_darwin.c`, `hidapi.h`; `systray@v1.2.2/systray.go` and, for the
+  amendments, `systray_windows.go` (`addOrUpdateMenuItem`, `hideMenuItem`).
 - Companion module read at `~/projects/companion-module-blinkybeacon` (v1.1.0): `src/index.ts`,
   `src/actions.ts`, `src/feedbacks.ts`.
 - Not measured here, and said so where it is used: Windows instance-id behaviour across reboot
   and port move (§5.2, Windows documentation; probe step 3); macOS location-id stability (§13);
   `hid.Enumerate` cost on Windows (§3); upstream's "hardware limitation" (§3, probe step 4).
+
+## Amendments — red team 2026-10-20
+
+A blind red team attacked this document at `e3760f8` and confirmed fourteen findings; the
+master ruled on each the same day. The rulings are applied above; this section says where. The
+owner's five decisions (§2) keep their recommendations; D1, D4 and D5 have corrected reasoning.
+
+| # | Finding | Ruling | Where the text changed |
+|---|---|---|---|
+| F1 | The hardware key (`port:6&2a…&0&0001`) cannot travel unencoded in `?beacon=`: Go splits the query on `&`, and the Companion module builds URLs by template. | The API's beacon id is a short public id the tray assigns (`b1`, `b2`, …), never reused after a Forget; the hardware key stays internal as the match key. `?beacon=` values are percent-encoded like any query value. A name that reads as a public id is refused at save. | §1; §5.3 ("Two ids per beacon"); §5.4; §6; §9.1; §9.3; §10.1 (`beacon_seq`, `key`); §10.2; §10.4; §11.2; §14.3 steps 2, 8, 10; T0, T2 |
+| F2 | §14.3 step 6 ("goes dark, not back to flashing") contradicted §7.2 row 7 and today's `Decide`, which keeps `flashUntil` through a pause; the user guide's sentence overstates the code. | Row 7 is the rule: paused > flash window > idle. A flash whose window is still running when the pause lifts resumes for what is left. | §1; §7.2 closing paragraph; §14.3 step 6 (now sees both outcomes); T4 (the pin test); T9 (correct `BEACON-DASHBOARD.md:351-354`) |
+| F3 | D1's argument against guessing was wrong: in port mode a swap matches both records and never triggers a guess. | Rewrite the alternative with the real risk (a light in a drawer, a borrowed light in a fresh port inherits its lines); say a swap behaves the same under both options. Recommendation stands. | §2 D1 |
+| F4 | A duplicated serial is still a serial to Windows: the instance id is built from it, so the port key stops being a port. The design had no mode for `DUPLICATED`. | `DUPLICATED` is its own outcome and a stop: the build picks no mode; the probe file comes back to the design. Say what to read in the file. | §3 (row 1); §5.3; §4 step 2; §14.1 step 2; T0 |
+| F5 | The §14.2 seam `Open(path) (Beacon, error)` could not carry `OnError`, `StartIdleWorker` or the macOS location id; "existing tests pass unchanged" did not hold. | Redesign the seam (`deviceSource`, `deviceInfo`, `deviceHandle` with `Key`, `OnUnplug`, `StartIdleWorker`); budget the test changes honestly. | §12; §14.2 (the types and "What changes in the existing tests, honestly"); §9.1 last paragraph; §7.1; T1, T5, T6 |
+| F6 | On Windows any `SetTitle`/`Enable`/`Disable`/`Check` on a hidden item re-inserts it at the end of its parent; the eight-slot plan had no ordering rule, and a root-level slot shown after start lands below Quit. | State the ordering rule: only visible slots are updated, a slot is retitled before it is shown and never touched while hidden; T7's fake models Windows; the hidden-parent check on real Windows is a hand step in T10. | §2 D4 (the `Beacons ▸` entry); §11.1 (layout and rule); T7; T10 |
+| F7 | Two config writers (the settings POST and the bind-save) with no merge rule; a stale tab could undo a bind; a bind through `restartCh` would restart the HTTP server. | One writer. The settings POST merges by public id (a forgotten id refuses the save; an unmentioned record is kept); a bind saves without a restart. | new §10.5; §10.2 step 2; §11.2; T2, T8; §14.2 scenarios |
+| F8 | The load argument cited the page-route measurement, not `/api/v0`, and omitted S79's "no rate limiting in v0, Cloudflare can throttle"; the tray has no backoff on 429/5xx. | Correct the claim, keep the arithmetic. Add per-line backoff on 429 only, honouring `Retry-After`, capped at 30 s; 5xx and unreachable unchanged. Name the status. | §8.1 ("A throttled line", status `throttled`); §8.2; §9.3 (`watch`); T4 |
+| F9 | §9.1's reply table had holes: all named beacons failing, a mix of unplugged and live, an empty `beacon=`, a name equal to another beacon's id. | Fill every hole with an explicit row; the no-parameter path keeps today's replies exactly. | §9.1 (the table); T6 |
+| F10 | The macOS "no Input Monitoring permission" claim was stated as fact on an app never run against a light on a Mac. | Move it to §3's unknowns, settled at the first Mac run. | §3 (new row); §13 ("Permissions") |
+| F11 | §3 did not ask whether one light is one HID path (several top-level collections share an instance segment). | Add it, with the reading rule from the probe file and what the design does if a light shows two paths. | §3 (new row); §14.1 step 2; §14.2 (`deviceInfo` carries the usage pair); T0 |
+| F12 | `OnError` runs on the keepalive goroutine holding the `FarmBeacon` mutex; closing from inside it deadlocks; the fake had no mutex. | The callback only marks the beacon unplugged and hands the close to the manager's goroutine; say why; T5's fake models the mutex so a close from inside the callback deadlocks the test. | §12 (item 2); §14.2 (`unplug`); T5 |
+| F13 | D5's "costs nothing": an older build's Save drops the `beacons` list. | Correct to the real cost; keep the recommendation with the caveat. | §2 D5 |
+| F14 | Identify and Forget acted on a form index, not the record id; a stale tab could delete the wrong record. | They carry the record's public id and the server checks it; a gone id is refused, never applied to another record. | §11.2; T8; §14.2 scenarios |
+
+Also corrected while applying the rulings: `extra_darwin.go` is 27 lines, ten of them code
+(§13), and the test-reuse sentence in §7.1 now says what it can.
