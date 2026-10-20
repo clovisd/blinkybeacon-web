@@ -11,7 +11,7 @@ Go 1.25+ is required (`go.mod` says `go 1.25.0`).
 
 [`.github/workflows/build.yml`](.github/workflows/build.yml) builds both
 architectures on a macOS runner on every push to `main` or `dashboard`, and
-attaches them to the GitHub release on a `dashboard-v*` tag:
+attaches them to the GitHub release on a release tag (`v*` or `dashboard-v*`):
 
 | Artifact | Contents |
 |---|---|

@@ -85,8 +85,10 @@ const boundMarkChoice = markSparkle
 
 // markArt is a mark drawn as rows of pixels: a byte found in pal is painted in
 // that colour, any other byte is left empty. Both marks sit in the bottom-right
-// corner, the one space the siren leaves free, and never share an edge with
-// it, so the two read as separate shapes. Both are solid shapes, nowhere
+// corner, the one space the siren leaves free. At 32 px neither shares an edge
+// with the siren. Halved to 16 px by averaging 2x2 blocks, the sparkle still
+// meets the base bar only corner to corner, but the brain's top row becomes
+// half-covered pixels directly under the bar. Both are solid shapes, nowhere
 // thinner than two pixels, so the 16-pixel tray keeps a solid core of each.
 type markArt struct {
 	x0, y0 int

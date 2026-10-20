@@ -239,9 +239,9 @@ never have to open Settings to check:
 | `Bound: line 3 (unnamed)` | Bound to line 3, but no poll has come back yet, so we only know the number. |
 | `Unbound` | No dashboard URL set — the watcher is off and the beacon is yours to drive by hand. |
 
-While that row says `Bound: …`, the tray icon carries a small mark in its
-bottom-right corner, so a glance at the tray tells you the dashboard is driving
-the light.
+While that row says `Bound: …` and a beacon is plugged in, the tray icon
+carries a small mark in its bottom-right corner, so a glance tells you the
+beacon is following a dashboard line.
 
 And below it, what the feed is doing on that line:
 
