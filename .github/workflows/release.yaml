@@ -9,6 +9,10 @@ jobs:
   release:
     name: Release Binaries
     runs-on: ubuntu-latest
+    # Uploading the CLI archive to the release needs write access: the
+    # repository's default workflow token is read-only.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
