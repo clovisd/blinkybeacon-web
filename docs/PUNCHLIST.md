@@ -34,7 +34,7 @@ takes its words from those answers.
 - watch: a second API token revokes the beacon's — the dashboard keeps one `lines:read` token, so minting one for another consumer darkens every beacon. Until DOTA-LIVE-DASHBOARD #75 is settled, mint no other (dotabot match-telemetry retros, 2026-08-20/21).
 - owner: the API token expires — tokens last 180 days (S79a spec), the beacon's from 2026-08-20 or later: the light may go dark from about 2027-02-16. "Don't know — note to mint a fresh one by February" (owner, 2026-09-30). A new `lines:read` token revokes the old: paste it in every tray at once.
 - watch: the dashboard's subdomain move — the owner's plan to serve the API from `api.dash.cl6.us` (S79 owner rulings, 2026-08-12), still planned with no date (owner, 2026-09-30): if a beacon's Dashboard URL has to change, the tray clears its saved token and each beacon needs it pasted again.
-- parked: CSRF on /spin /flash /stop — the same hole the settings form closed (b1-token retro, 2026-08-20). The owner lifted the Companion freeze for this fix only (2026-09-30): the module sends a token (S17), then the tray checks it (S18).
+- parked: CSRF on /spin /flash /stop (dashboard line) — the same hole the settings form closed (b1-token retro, 2026-08-20). The owner lifted the Companion freeze for it (2026-09-30): the module sends a token (S17), then the tray checks it (S18).
 - owner: approved 2026-09-30, once the macOS and replug checks pass — promote both releases out of prerelease: `gh release edit v0.4.0 --repo clovisd/blinkybeacon-web --prerelease=false --latest` · `gh release edit dashboard-v0.7.0 --repo clovisd/blinkybeacon-web --prerelease=false --latest=false`
 - Re-commit `tools/protocol-fuzzer` (the tool and its testing guide) from `origin/protocol-fuzzer` in a pull request under the owner's name; the old commit's author field cannot land on `main`. The branch stays (owner, 2026-09-30).
 - Match identity across back-to-back matches (dashboard line) — if the earlier match spent its flash, a next match named only after hero selection never flashes, and one named during it flashes late or twice. Needs the next match seen within 30 s; unmeasured live (dash-fixes retro, 2026-10-02).
@@ -52,6 +52,7 @@ Real, known, and deliberately not queued: each one is told to users or recorded 
 - A hand-edited `"pause_side": "Radiant "` (trailing space) in the config file (dashboard line) falls back to both sides; the settings form trims, the file loader does not (b4-settings retro).
 - `go test ./...` is red on Linux: `pkg/fsbeacon` needs libudev. Test `./cmd/blinkybeacon-tray/` only.
 - A match abandoned during the draft, then the next first seen with its draft already finished and no match id yet, flashes once for that draft (dashboard line; `BEACON-DASHBOARD.md` §7, dashboard-v0.8.0).
+- `/spin`, `/flash` and `/stop` on `main` take no token, so a web page opened on the tray's PC can press them: the owner keeps `main` as it is (2026-10-20), and the dashboard line closes it in S18.
 - A hand-typed `poll_interval_ms` must be a bare whole number: a quoted or decimal value makes the config file unreadable, and every setting, the token included, falls back to its default (dashboard line; `BEACON-DASHBOARD.md` §4).
 
 ## Deferred
